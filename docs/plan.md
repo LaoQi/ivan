@@ -13,9 +13,10 @@ ivan 是常驻的极简 agent：**特化在定时触发与计划任务**，全�
 目标
 
 1. 常驻单进程，消息可来自 QQ 机器人、本地 CLI、定时作业；答复回到来源渠道。
-2. 模型可自建计划任务（`schedule` 工具），作业持久化、重启恢复、结果回灌原会话。
-3. 长任务跨会话自主推进：复用 tanya 的交接机制，无人干预也能续跑，并受预算与暂停开关约束。
+2. 模型可自建计划任务（`schedule` 工具），作业持久化、重启恢复、结果回灌原会话（**通知 best-effort**，见红线）。
+3. 长任务跨会话推进：借用 tanya 的交接机制 + 自建护栏（默认关、仅指定工作区、轮次与预算硬上限、结果待人复核）——不承诺无人值守完成开放目标。
 4. 复用 tanya 的 agent 核心，不复制代码；需要的能力缺口在 tanya 侧小步补齐，两仓库同步推进。
+5. 通知按配置 fan-out：启用哪些出站通道就发到哪些通道，任一通道失败不影响其余，不做必达承诺。
 
 非目标（本期不做）
 
@@ -36,15 +37,16 @@ ivan 是常驻的极简 agent：**特化在定时触发与计划任务**，全�
 ## 4 总体架构
 
 ```
-Channel 层    qq / cli / log —— 唯一的输入输出面（IM、本地、日志）
+Channel 层    qq / cli /（后置）webhook —— 外部端点
+Trigger 层    schedule /（后置）heartbeat —— 产出 inbound 消息
+Sink 层       events jsonl + 人类可读日志 —— 只出
    ↕  MessageBus（inbound / outbound 两条流，带缓冲、非阻塞投递）
 Runner 层     会话键 → agent 实例；入站消息 → 回合；事件 → 出站消息 / 事件日志
    ↕
 Core 层       tanya 的 agent（LLM/回合/工具/会话/交接）+ ivan 特化工具
-Schedule 层   作业存储 + 调度循环 → 以 inbound 消息注入（channel 指向目标渠道）
 ```
 
-一切输入都是 inbound 消息：QQ 用户消息、CLI 命令、定时作业触发、（后置）webhook 与心跳。区别只在 `Channel` 字段，之后走同一条路径：会话键路由 → agent 回合 → 出站消息回到来源渠道。"IM 只是一个 channel"即由此落地。
+一切输入都是 inbound 消息：QQ 用户消息、CLI 命令、定时作业触发、（后置）webhook 与心跳。区别只在来源字段，之后走同一条路径：会话键路由 → agent 回合 → 出站消息按配置 fan-out 回目标通道。"IM 只是一个 channel"即由此落地。
 
 事件流（`agent.Event`）在 runner 侧被消费：文本增量聚合为出站消息，工具/回合事件落事件日志，回合结束触发通知。
 
@@ -64,30 +66,29 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 
 **抽库候选**（隔离规则：这些包只依赖标准库与自身类型，不得依赖 ivan 其他包与 tanya）
 
-| 候选 | 依赖纪律 | 抽库形态 |
+| 候选 | 依赖纪律 | 抽库计划 |
 |---|---|---|
-| `qqbot/` | 纯协议，零 ivan 依赖，只暴露自身类型与回调 | `github.com/LaoQi/qqbot` |
-| `bus/` | 纯消息结构 + 通道，零依赖 | 随通道抽象一并抽 |
-| `channel/` | 仅依赖 `bus` | 随通道抽象一并抽 |
-| `schedule/` | 仅依赖标准库 + 自身 Job 类型 | `github.com/LaoQi/schedule`（视复用情况） |
+| `qqbot/` | 纯协议，零 ivan 依赖，只暴露自身类型与回调 | **首个抽出对象**：P2 真机跑通、接口稳定后抽为 `github.com/LaoQi/qqbot` |
+| `bus/` | 纯消息结构 + 通道，零依赖 | 暂留（只有一个消费者，抽库是纯成本） |
+| `channel/` | 仅依赖 `bus` | 暂留，接口随 P1–P4 演进 |
+| `schedule/` | 仅依赖标准库 + 自身 Job 类型 | 暂留（视是否出现第二消费者） |
 
 `channel/qq/` 是适配器：把 `qqbot/` 的协议事件翻译成 `bus.InboundMessage`，把 `bus.OutboundMessage` 翻回协议调用。**协议与业务的分界固定在 `qqbot/` 边界上**，抽库时 ivan 只改 import 路径。
 
 ## 6 数据布局
 
 ```
-<data_dir>/                       默认 ~/.local/share/ivan
+<data_dir>/                       默认 ~/.local/share/ivan（与 tanya 分离，互不干扰）
   ivan.sock                       daemon 的 unix socket（cli 通道）
   state.json                      运行状态：会话映射、暂停开关、预算计数
   jobs.json                       计划任务（原子写）
   events/<date>.jsonl             结构化事件日志（回合/工具/错误）
   logs/ivan.log                   进程日志
   media/                          收发媒体缓存（图片）
-  inbox/                          （后置）文件收件箱
-  workspaces/<ws-id>/sessions/    tanya 格式会话文件（由 agent 管理，可被 tanya 打开）
+  workspaces/<ws-id>/sessions/    tanya 格式会话文件（由 agent 管理）
 ```
 
-会话文件沿用 tanya 的 jsonl 格式与目录约定，保证同一工作区里 tanya 与 ivan 的会话可互相看见、继续。
+**数据目录与 tanya 分离**（决策）：各自的 `data_dir` 独立，避免归档/活跃会话统计互相干扰。会话文件仍是 tanya 的 jsonl 格式，需要互见时用配置显式指向同一目录 + 同一工作区路径（默认不开）。
 
 ## 7 运行形态
 
@@ -105,7 +106,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 | P1 | `bus` + `channel` 抽象 + `cli`/`log` 通道 + daemon（socket、单实例锁、优雅停机、status） | 两个通道跑通；daemon 重启后状态可查、会话可续 |
 | P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | 协议单测 + 假网关集成测试通过；沙箱机器人真机互通（凭证实施时提供） |
 | P3 | 定时与计划任务：Job 存储、调度循环、`schedule` 工具、结果回原渠道 | 重启后作业恢复；模型自建任务按时触发并把结果发回会话 |
-| P4 | 自主续跑与记忆：交接自动续跑、上下文阈值自动交接、记忆/目标文件、预算熔断、暂停开关 | 无人干预跨多会话推进一个多步目标，且被预算/暂停约束 |
+| P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接、按需读取的记忆/目标文件、预算熔断、暂停开关 | 在指定低风险工作区开启后，单条消息触发能跨会话推进并被轮次/预算/暂停约束住；不承诺无人值守完成开放目标 |
 | P5 | 安全与运维：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 危险命令被拦；服务随 systemd 起停 |
 
 ## 9 决策记录
@@ -139,3 +140,18 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 - `docs/sessions.md` 会话模型、agent 实例池与推进策略
 - `docs/refs-picoclaw.md` 参考调研快照与取舍
 - 根 `AGENTS.md` 现行约束与结构；`CHANGELOG.md` 变更记录
+
+## 附录 A 评估修订（2026-10-10）
+
+对外部事实与口径的修订（依据官方文档实测 + 用户拍板）：
+
+1. **QQ 被动过滤窗口纠正**：单聊 60 分钟 / 每条消息 4 次（原方案误写 5 分钟 / 5 条）；群聊 5 分钟 / 5 次。`msg_seq` 以入站消息 id 为键维护。
+2. **主动消息可用但非必达**：QQ 主动消息有频控与日上限（单聊 1000 条/用户/天），且用户可关闭"允许主动发送" → 通知恒为 best-effort。
+3. **通知 fan-out 可配**：启用哪些出站通道就发到哪些通道，互不影响，不保证投达。
+4. **数据目录分离**：ivan 独立 `data_dir`，会话互见改为可选配置。
+5. **抽库推迟到 P2 之后，且首抽只抽 `qqbot`**。
+6. **受控推进**：自动续跑默认关、仅指定工作区、硬预算上限、结果待人复核。
+7. **记忆按需读取**：记忆/目标文件路径写入提示词由模型自读，长期压缩依赖交接摘要，不做每轮全量注入。
+8. **新增 ivan 侧配置**：`context_window_tokens`、`handoff_threshold`、`auto_continue`、预算项。
+9. **概念三分**：`Channel`（外部端点）/ `Trigger`（内部触发源）/ `Sink`（观测出口），不再把所有 IO 硬套通道接口。
+10. **沙箱降级为可选增强**：安全主线是审批白/黑名单 + 预算 + 只读纪律。

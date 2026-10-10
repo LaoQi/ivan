@@ -32,11 +32,13 @@ Inbound → runner.dispatch(msg)
 
 1. 聚合本轮文本 → `OutboundMessage{ReplyTo: inbound.MessageID}` → Bus（回到来源渠道）。
 2. `TakeHandoff()`：若有交接 → 更新 `state.json` 的 session 映射 → 若 `Continue` 则立即 `agent.Continue(ctx, sink)` 继续跑（这就是长任务跨会话推进）。
-3. 上下文压力：`EventResponse.ContextTokens` 或 `Stats()` 超过阈值（默认模型窗口的 70%）且本轮未交接 → 注入一条"请调用 next_session 交接"的 user 消息触发交接（下一轮生效），防止撑爆上下文。
+3. 上下文压力：tanya 没有"模型窗口"概念（`Stats.ContextTokens` 是上次请求 prompt tokens、`Stats.Est` 是本地估算），故 **ivan 侧新增配置** `context_window_tokens` 与 `handoff_threshold`（默认 0.7）；`Stats.Est` 或 `EventResponse.ContextTokens` 超阈值且本轮未交接 → 注入一条"请调用 next_session 交接"的 user 消息触发交接（下一轮生效）。
 4. 预算：累计 token/时长/续跑轮次超限 → 停止推进，落事件并（可选）通知人。
 5. 失败：回合错误 → 记事件、按策略重试（有限次）、必要时回一条错误摘要到来源渠道。
 
-**推进上限**是一个硬保护：单次 inbound 触发的自动续跑轮次有上限（默认 8 轮），超限则停下并把状态写进会话（下次人工/定时消息可继续），避免一次触发烧穿预算。
+**自主推进是受控能力**（配置项 `auto_continue`，**默认关**）：开启后单次 inbound 触发的自动续跑轮次有上限（默认 8 轮），并受 `max_tokens_per_task` / `max_duration_per_task` 约束；超限即停下并把状态写进会话（下次人工/定时消息可继续）。建议只在指定工作区（低风险、只读或报告类任务）启用。
+
+**per-turn 上下文注入**（`schedule` 等工具需要"当前消息来自哪个通道/会话"）：每个 `Agent` 实例配一套工具实例，runner 在该实例的回合开始前写入当轮上下文（通道/chatID/messageID），回合结束清空；同实例回合串行保证不串号，上下文只由 runner 写入、模型不可伪造。
 
 ## 5 并发与背压
 

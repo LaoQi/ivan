@@ -47,15 +47,22 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
 - 首期处理：
   - `C2C_MESSAGE_CREATE`：单聊消息，`d.author.user_openid`、`d.content`、`d.id`（被动回复用）
   - `GROUP_AT_MESSAGE_CREATE`：群内 @ 机器人，`d.group_openid`、`d.author.member_openid`、`d.content`、`d.id`
+- 群内**全量消息** `GROUP_MESSAGE_CREATE` 需额外权限，本期不做
 - 未处理事件（成员变动、表情表态等）只记 debug 日志，不投递业务。
 
 ## 6 发送
 
 - 单聊：`POST /v2/users/{openid}/messages`；群聊：`POST /v2/groups/{group_openid}/messages`。**[核对]**
-- 文本：`{content, msg_type: 0, msg_id?, msg_seq?}`。
-- **被动回复**：带最近一条入站消息的 `msg_id`，且 5 分钟内条数有限（[核对] 具体上限，按 5 条实现），`msg_seq` 从 1 递增；`msg_seq` 由适配器按 `ChatID` 记数（内存 + 落 state，重启重置可从 1 起）。
-- 超出被动窗口 → 走主动消息（需要平台授权与配额）；配置可关闭主动消息，超窗即失败并记日志。
-- 图片：先上传 `/v2/users/{openid}/files`（或群对应接口），`file_type: 1`，得到 `file_info`（`file_uuid`/`ttl`），再以富媒体消息发送（`msg_type: 7` + `media`，或图片+文本组合，[核对] 具体形态）。`ttl` 过期需重传，适配器缓存 `file_uuid` 并处理失效重传。
+- 文本：`{content, msg_type: 0, msg_id?, msg_seq?}`；`msg_type`：`0` 文本 / `2` markdown / `7` 富媒体。
+- **被动回复**（官方文档实测，2026-10-21 版）：
+  - 单聊：有效期 **60 分钟**，每条消息最多回复 **4 次**
+  - 群聊：有效期 **5 分钟**，最多 **5 次**
+  - **相同 `msg_id` + `msg_seq` 重复发送会失败**，递增 `msg_seq` 才可多次回复 → `msg_seq` 必须**以入站消息 id 为键**维护计数（TTL 随窗口清理，不按 ChatID 记），进程重启后从 1 重新计数，失败则递增重试
+- **主动消息**（无 `msg_id`）：官方频控——单聊认证 10/qps & 20/qpm、未认证 5/qps & 30/qpm，日上限 **1000 条/用户**；群聊 60/qpm（未认证 30/qpm），日上限 **1000 条/群**。
+  - **用户可在 QQ 客户端关闭"允许主动发送"，关闭后一律发送失败** → 通知定位为 **best-effort**，失败必须计数并可见，不得承诺投达。
+  - 互动召回（`is_wakeup: true`）：用户对话后 30 天内仅 4 个周期各 1 条，**不作为常规通知手段**。
+- **功能前提**：官方要求机器人保持 WebSocket 在线才能发送消息 → 重连健壮性是功能前提而非体验优化。
+- 图片：先上传 `/v2/users/{openid}/files`（单聊）或群对应接口（**单聊与群聊上传接口不互通**），`file_type: 1`，得到 `file_info`（`file_uuid`/`ttl`），再以 `msg_type: 7` + `media.file_info` 发送。官方推荐**分片上传**（无需公网 CDN），整文件上传为备选；`ttl` 过期需重传，适配器缓存 `file_uuid` 并处理失效重传。
 - 消息长度：按官方上限切分（[核对]），默认保守 1200 字符，走通用切分器（见 `docs/channels.md` §6）。
 - 限流：发送失败带平台错误码时，区分「限流」「权限不足」「参数错误」「凭证失效」，分别退避重试 / 直接失败 / 记录待查。
 
@@ -98,3 +105,16 @@ channels:
 - [ ] 图片上传接口路径、`file_type` 枚举、`ttl` 行为
 - [ ] 主动消息的权限与配额
 - [ ] 错误码表（限流/权限/参数/凭证）
+
+## 11 官方规则速查（实测 2026-10-10 抓取）
+
+| 项 | 单聊 | 群聊 |
+|---|---|---|
+| 接收事件 | `C2C_MESSAGE_CREATE` | `GROUP_AT_MESSAGE_CREATE` |
+| 被动有效期 | 60 分钟 | 5 分钟 |
+| 每条消息可回复次数 | 4 | 5 |
+| 主动频控（认证/未认证） | 10/qps & 20/qpm ｜ 5/qps & 30/qpm | 60/qpm ｜ 30/qpm |
+| 主动日上限 | 1000 条/用户 | 1000 条/群 |
+| 上传接口 | 独立，不互通 | 独立，不互通 |
+
+其他：`msg_type` `0` 文本 / `2` markdown / `7` 富媒体；相同 `msg_id`+`msg_seq` 重复发送失败；机器人须 WebSocket 在线才能发消息；用户可关闭"允许主动发送"。
