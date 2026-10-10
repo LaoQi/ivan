@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultValues(t *testing.T) {
@@ -95,5 +96,80 @@ func TestBorrowTanyaConfig(t *testing.T) {
 	}
 	if cfg2.APIKey != "explicit" {
 		t.Fatalf("显式 env 应优先于借用: %q", cfg2.APIKey)
+	}
+}
+
+func TestDaemonDefaultsAndPaths(t *testing.T) {
+	cfg := Default()
+	if cfg.Daemon.BusBuffer != DefaultBusBuffer || cfg.Daemon.MaxConcurrent != DefaultMaxConcurrent {
+		t.Fatalf("daemon 默认值异常: %+v", cfg.Daemon)
+	}
+	if cfg.Runner.MaxAgents != DefaultMaxAgents || cfg.Runner.IdleTimeoutMinutes != DefaultIdleMinutes {
+		t.Fatalf("池默认值异常: %+v", cfg.Runner)
+	}
+	if !cfg.CLIEnabled() {
+		t.Fatal("cli 通道默认应启用")
+	}
+	if cfg.SendTimeout() != time.Duration(DefaultSendSeconds)*time.Second {
+		t.Fatalf("SendTimeout=%v", cfg.SendTimeout())
+	}
+	if cfg.IdleTimeout() != time.Duration(DefaultIdleMinutes)*time.Minute {
+		t.Fatalf("IdleTimeout=%v", cfg.IdleTimeout())
+	}
+	for _, p := range []string{cfg.SocketPath(), cfg.StatePath(), cfg.LockPath(), cfg.EventsDir(), cfg.LogPath()} {
+		if !filepath.IsAbs(p) {
+			t.Fatalf("路径应为绝对路径: %s", p)
+		}
+	}
+	if cfg.AgentDir("cli-default") != filepath.Join(cfg.AgentsDir(), "cli-default") {
+		t.Fatalf("AgentDir 异常: %s", cfg.AgentDir("cli-default"))
+	}
+}
+
+func TestNormalizePathsAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "data_dir: " + dir + "\ndaemon:\n  socket: sock/ivan.sock\n  max_concurrent: -1\nrunner:\n  max_agents: 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IVAN_TANYA_CONFIG", filepath.Join(dir, "absent.yaml"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(dir, "sock", "ivan.sock"); cfg.SocketPath() != want {
+		t.Fatalf("相对 socket 未落到 data_dir: %s", cfg.SocketPath())
+	}
+	if cfg.Daemon.MaxConcurrent != DefaultMaxConcurrent || cfg.Runner.MaxAgents != DefaultMaxAgents {
+		t.Fatalf("非法值未回落到默认: %+v %+v", cfg.Daemon, cfg.Runner)
+	}
+	t.Setenv("IVAN_SOCKET", "/tmp/ivan-env.sock")
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg2.SocketPath() != "/tmp/ivan-env.sock" {
+		t.Fatalf("IVAN_SOCKET 未生效: %s", cfg2.SocketPath())
+	}
+}
+
+func TestExpandHomeDataDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("data_dir: ~/.local/share/ivan-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IVAN_TANYA_CONFIG", filepath.Join(dir, "absent.yaml"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(home, ".local/share/ivan-test"); cfg.DataDir != want {
+		t.Fatalf("~ 未展开: %s", cfg.DataDir)
+	}
+	if want := filepath.Join(home, ".local/share/ivan-test", DefaultSocket); cfg.SocketPath() != want {
+		t.Fatalf("socket 未跟随 data_dir: %s", cfg.SocketPath())
 	}
 }

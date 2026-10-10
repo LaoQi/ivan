@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -14,12 +15,19 @@ import (
 var Version = "dev"
 
 const (
-	DefaultSessionMode    = "global"
-	DataDirSuffix         = ".local/share/ivan"
-	ConfigPathSuffix      = ".config/ivan/config.yaml"
-	TanyaConfigPathSuffix = ".config/tanya/config.yaml"
-	UserAgentURL          = "https://github.com/LaoQi/ivan"
-	EnvPrefix             = "IVAN_"
+	DefaultSessionMode     = "global"
+	DataDirSuffix          = ".local/share/ivan"
+	ConfigPathSuffix       = ".config/ivan/config.yaml"
+	TanyaConfigPathSuffix  = ".config/tanya/config.yaml"
+	UserAgentURL           = "https://github.com/LaoQi/ivan"
+	EnvPrefix              = "IVAN_"
+	DefaultSocket          = "ivan.sock"
+	DefaultBusBuffer       = 64
+	DefaultMaxConcurrent   = 2
+	DefaultShutdownSeconds = 30
+	DefaultSendSeconds     = 60
+	DefaultMaxAgents       = 8
+	DefaultIdleMinutes     = 30
 )
 
 type RunnerConfig struct {
@@ -28,14 +36,34 @@ type RunnerConfig struct {
 	AutoContinue        bool    `yaml:"auto_continue"`
 	MaxTurnsPerTask     int     `yaml:"max_turns_per_task"`
 	MaxTokensPerTask    int     `yaml:"max_tokens_per_task"`
+	MaxAgents           int     `yaml:"max_agents"`
+	IdleTimeoutMinutes  int     `yaml:"idle_timeout_minutes"`
+}
+
+type DaemonConfig struct {
+	Socket                 string `yaml:"socket"`
+	BusBuffer              int    `yaml:"bus_buffer"`
+	MaxConcurrent          int    `yaml:"max_concurrent"`
+	ShutdownTimeoutSeconds int    `yaml:"shutdown_timeout_seconds"`
+	SendTimeoutSeconds     int    `yaml:"send_timeout_seconds"`
+}
+
+type CLIConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type ChannelsConfig struct {
+	CLI CLIConfig `yaml:"cli"`
 }
 
 type Config struct {
 	agent.Config  `yaml:",inline"`
-	Runner        RunnerConfig `yaml:"runner"`
-	ImageMaxBytes int          `yaml:"image_max_bytes"`
-	ImageResize   bool         `yaml:"image_resize"`
-	Path          string       `yaml:"-"`
+	Runner        RunnerConfig   `yaml:"runner"`
+	Daemon        DaemonConfig   `yaml:"daemon"`
+	Channels      ChannelsConfig `yaml:"channels"`
+	ImageMaxBytes int            `yaml:"image_max_bytes"`
+	ImageResize   bool           `yaml:"image_resize"`
+	Path          string         `yaml:"-"`
 }
 
 func UserAgent(version string) string {
@@ -45,7 +73,7 @@ func UserAgent(version string) string {
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	path := filepath.Join(home, filepath.FromSlash(ConfigPathSuffix))
-	return &Config{
+	cfg := &Config{
 		Config: agent.Config{
 			ConfigPath:       path,
 			BaseURL:          "https://api.openai.com/v1",
@@ -63,11 +91,23 @@ func Default() *Config {
 			HandoffThreshold:    0.7,
 			AutoContinue:        false,
 			MaxTurnsPerTask:     8,
+			MaxAgents:           DefaultMaxAgents,
+			IdleTimeoutMinutes:  DefaultIdleMinutes,
 		},
+		Daemon: DaemonConfig{
+			Socket:                 DefaultSocket,
+			BusBuffer:              DefaultBusBuffer,
+			MaxConcurrent:          DefaultMaxConcurrent,
+			ShutdownTimeoutSeconds: DefaultShutdownSeconds,
+			SendTimeoutSeconds:     DefaultSendSeconds,
+		},
+		Channels:      ChannelsConfig{CLI: CLIConfig{Enabled: true}},
 		ImageMaxBytes: agent.DefaultImageMaxBytes,
 		ImageResize:   true,
 		Path:          path,
 	}
+	cfg.normalize()
+	return cfg
 }
 
 func Load(path string) (*Config, error) {
@@ -96,6 +136,7 @@ func Load(path string) (*Config, error) {
 	if cfg.APIKey == "" {
 		borrowTanya(cfg)
 	}
+	cfg.normalize()
 	return cfg, nil
 }
 
@@ -113,6 +154,87 @@ func applyEnv(cfg *Config) {
 	set("REASONING_EFFORT", &cfg.ReasoningEffort)
 	set("SESSION_MODE", &cfg.SessionMode)
 	set("IMAGE_DETAIL", &cfg.ImageDetail)
+	set("SOCKET", &cfg.Daemon.Socket)
+}
+
+func (c *Config) normalize() {
+	c.DataDir = expandHome(c.DataDir)
+	if strings.TrimSpace(c.Daemon.Socket) == "" {
+		c.Daemon.Socket = DefaultSocket
+	}
+	if c.Daemon.BusBuffer <= 0 {
+		c.Daemon.BusBuffer = DefaultBusBuffer
+	}
+	if c.Daemon.MaxConcurrent <= 0 {
+		c.Daemon.MaxConcurrent = DefaultMaxConcurrent
+	}
+	if c.Daemon.ShutdownTimeoutSeconds <= 0 {
+		c.Daemon.ShutdownTimeoutSeconds = DefaultShutdownSeconds
+	}
+	if c.Daemon.SendTimeoutSeconds <= 0 {
+		c.Daemon.SendTimeoutSeconds = DefaultSendSeconds
+	}
+	if c.Runner.MaxAgents <= 0 {
+		c.Runner.MaxAgents = DefaultMaxAgents
+	}
+	if c.Runner.IdleTimeoutMinutes <= 0 {
+		c.Runner.IdleTimeoutMinutes = DefaultIdleMinutes
+	}
+	if c.Runner.MaxTurnsPerTask <= 0 {
+		c.Runner.MaxTurnsPerTask = 8
+	}
+}
+
+func (c *Config) SocketPath() string {
+	p := strings.TrimSpace(c.Daemon.Socket)
+	if p == "" {
+		p = DefaultSocket
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(c.DataDir, p)
+}
+
+func (c *Config) StatePath() string { return filepath.Join(c.DataDir, "state.json") }
+
+func (c *Config) LockPath() string { return filepath.Join(c.DataDir, "ivan.lock") }
+
+func (c *Config) EventsDir() string { return filepath.Join(c.DataDir, "events") }
+
+func (c *Config) LogPath() string { return filepath.Join(c.DataDir, "logs", "ivan.log") }
+
+func (c *Config) AgentsDir() string { return filepath.Join(c.DataDir, "agents") }
+
+func (c *Config) AgentDir(slug string) string { return filepath.Join(c.AgentsDir(), slug) }
+
+func (c *Config) SendTimeout() time.Duration {
+	return time.Duration(c.Daemon.SendTimeoutSeconds) * time.Second
+}
+
+func (c *Config) ShutdownTimeout() time.Duration {
+	return time.Duration(c.Daemon.ShutdownTimeoutSeconds) * time.Second
+}
+
+func (c *Config) IdleTimeout() time.Duration {
+	return time.Duration(c.Runner.IdleTimeoutMinutes) * time.Minute
+}
+
+func (c *Config) CLIEnabled() bool { return c.Channels.CLI.Enabled }
+
+func expandHome(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return p
+		}
+		if p == "~" {
+			return home
+		}
+		return filepath.Join(home, p[2:])
+	}
+	return p
 }
 
 func borrowTanya(cfg *Config) {

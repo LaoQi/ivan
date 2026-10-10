@@ -1,6 +1,6 @@
 # 会话模型与推进策略
 
-> 状态：规划。目标：会话连续、长任务能自主推进、并发可控可恢复。
+> 状态：**P1 已实现**（会话键→实例池、映射持久化、回合驱动、重启恢复）。目标：会话连续、长任务能自主推进、并发可控可恢复；实现记录见 §9。
 
 ## 1 会话键 → agent 实例
 
@@ -65,3 +65,16 @@ Inbound → runner.dispatch(msg)
 - 一个多步任务被单条消息触发后，`next_session` 交接 + 自动续跑完成，事件日志里能看到会话 id 的切换。
 - 上下文超过阈值时自动交接，不出现"上下文超限"报错。
 - 自动续跑轮次/预算超限时安静停下并留下可见状态。
+
+## 9 P1 实现记录（2026-10-10）
+
+代码：`runner/`（`runner.go` 回合驱动 + `pool.go` 实例池）、`data/state.go`；测试：`runner/runner_test.go`（假 LLM，9 例）、`daemon/daemon_test.go`（端到端，5 例）。
+
+1. **实例池**：`acquire(key)` 懒建 `instance{key, ws, mu, ag}`，`ag` 首次回合时构造；池上限 `runner.max_agents`（默认 8）满则淘汰最久未用的**空闲**实例（`mutex.TryLock` 失败即视为在跑，跳过）；`runner.idle_timeout_minutes`（默认 30）到期由后台 goroutine 回收。回收只释放内存，会话文件不动。
+2. **工作区**：`<data_dir>/agents/<KeySlug>`；`agent.New` 会先按进程 cwd 建会话目录，随后 `SwitchWorkspace(inst.ws)` 并清理空残留目录（`cleanStrayDirs`），因此 cwd 不会污染数据目录。
+3. **回合驱动**：`Runner.Run(ctx)` 只做入站消费与并发闸门（`daemon.max_concurrent`，默认 2），每条消息一个 goroutine；`Dispatch(ctx, msg)` 内持 `instance.mu` 保证**同键串行**。事件 sink 只做三件轻活：累加文本、写缓冲事件 channel、渲染前台流；落盘与出站都不在 sink 里阻塞。
+4. **出站**：任务级聚合（`auto_continue` 的多轮也合成一条），`Channel/ChatID/ReplyTo` 复制自入站消息 → 回到来源渠道；出错时 `Kind=error` 且失败文本兜底。
+5. **映射**：`state.json` 记 `SessionKey → {session_id, workspace, updated_at}`，回合结束与交接后原子写（临时文件 + fsync + rename，0600）；解析失败**拒绝启动**并保留原文件。
+6. **交接**：`TakeHandoff()` → 立即更新映射。`auto_continue`（默认**关**）开启时才 `Continue`，且受 `max_turns_per_task` 与 `max_tokens_per_task`（0=不限）双重熔断，超限落 `budget` 日志后安静停下。
+7. **重启恢复**：映射恢复走 `LoadSession`；映射存在但会话文件丢失（`SessionDir` 下找不到）时回退新建并记 warn + 清映射。**未做**：崩溃后回合的 `interrupted` 标记（P4 与暂停开关一起）。
+8. **仍待办（P4）**：上下文阈值自动交接（`context_window_tokens`/`handoff_threshold` 已进配置但未接线）、跨 handoff 的预算累计（tanya `Stats` 在交接后 reset）、`ivan cancel <session>`。

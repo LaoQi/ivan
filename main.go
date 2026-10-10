@@ -5,14 +5,10 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/LaoQi/tanya/ctty"
 
 	"github.com/LaoQi/ivan/config"
-	"github.com/LaoQi/ivan/data"
-	"github.com/LaoQi/ivan/runner"
 )
 
 var (
@@ -42,7 +38,13 @@ func run(args []string) int {
 	}
 	switch args[0] {
 	case "run":
-		return runOnce(args[1:])
+		return cmdRun(args[1:])
+	case "daemon":
+		return cmdDaemon(args[1:])
+	case "send":
+		return cmdSend(args[1:])
+	case "status":
+		return cmdStatus(args[1:])
 	}
 	usage()
 	return 1
@@ -85,35 +87,18 @@ func usage() {
 	fmt.Fprint(os.Stderr, `ivan - 常驻的极简 agent
 
 用法:
-  ivan run "指令"      前台执行一轮（调试与无通道时使用）
-  ivan config          输出默认配置示例
-  ivan -v              版本
+  ivan run [--session=键] "指令"        前台执行一轮（不起 daemon）
+  ivan daemon                          常驻运行（unix socket + 通道）
+  ivan send [--session=键] [--timeout=秒] [--no-wait] "指令"
+                                       经 socket 投给 daemon 并等回复
+  ivan status [--json]                 查询 daemon 状态（未运行时读磁盘状态）
+  ivan config                          输出默认配置示例
+  ivan -v                              版本
 `)
 }
 
-func runOnce(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "用法: ivan run \"指令\"")
-		return 1
-	}
-	cfg, err := config.Load("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-	log, err := data.NewEventLog(filepath.Join(cfg.DataDir, "events"), 256)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-	defer log.Close()
-	r, err := runner.New(cfg, log, os.Stdout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
+func signalContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ctty.WatchSignals()
 	go func() {
 		select {
@@ -122,9 +107,5 @@ func runOnce(args []string) int {
 		case <-ctx.Done():
 		}
 	}()
-	if err := r.Ask(ctx, strings.Join(args, " ")); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-	return ctty.ExitStatus()
+	return ctx, cancel
 }

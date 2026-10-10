@@ -34,3 +34,25 @@ runner:
   max_turns_per_task: 8
   # 单任务 token 预算（0 = 不限）
   max_tokens_per_task: 0
+  # 会话实例池上限（超出时淘汰最久未用的空闲实例）
+  max_agents: 8
+  # 空闲实例回收时间（分钟）
+  idle_timeout_minutes: 30
+
+# 常驻进程（见 docs/channels.md）
+daemon:
+  # cli 通道的 unix socket；相对路径落在 data_dir 下
+  socket: ivan.sock
+  # 总线缓冲深度（入站/出站各自，满了丢弃并计数）
+  bus_buffer: 64
+  # 跨会话并发回合上限（同一会话始终串行）
+  max_concurrent: 2
+  # 停机时等待在跑回合收尾的秒数，超时取消
+  shutdown_timeout_seconds: 30
+  # 出站单条发送超时（秒，含重试窗口）
+  send_timeout_seconds: 60
+
+channels:
+  # 本地 cli 通道（unix socket，ivan send/status 用它）
+  cli:
+    enabled: true

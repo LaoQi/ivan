@@ -49,7 +49,7 @@ stdout: ivan-smoke
 
 | 阶段 | 待验证 |
 |---|---|
-| P1 | daemon 重启后会话映射恢复；socket 往返；单实例锁 |
+| P1 | ✅ 已验证（2026-10-10）：`state.json` 映射 + `LoadSession` 重启续聊、cli socket 往返、flock 单实例锁；见 `runner/`、`daemon/` 测试与 `docs/sessions.md` §9 |
 | P2 | QQ 假网关端到端；真机收发（凭证就绪后） |
 | P3 | 作业重启恢复；`schedule` 工具的 per-turn 上下文（R10 已证可行，待接 runner） |
 | P4 | 交接阈值触发；**跨 handoff 的预算累计**（`Stats` 在交接后 reset，必须由 ivan 自己累计） |
