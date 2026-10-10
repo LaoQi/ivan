@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**规划阶段，尚无代码**。开工顺序与验收见 `docs/plan.md` §8。
+> 状态：**P0 已完成**（骨架 + 复用探针，结论见 `docs/reuse-probe.md`）；下一步 P1（bus/channel 抽象 + cli 通道 + daemon）。阶段与验收见 `docs/plan.md` §8。
 
 ## 设计约束
 
@@ -19,21 +19,22 @@
 - 持久化一律原子写（临时文件 + fsync + rename）；解析失败保留原文件并显式报错，**不静默重建**
 - 启动拒绝 root（复用 `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致
 - 部署纪律：部署态只做只读探测；功能验证在本地或临时环境完成
+- **会话目录按会话键隔离**：每个 `SessionKey` 一个工作区目录 `<data_dir>/agents/<key-slug>/`（tanya 会话 id 为秒级时间戳，多实例共享工作区会互相覆盖，见 `docs/reuse-probe.md` R11）
+- **`tools.Options.Workspace` 必须是动态闭包**指向 `agent.Workspace()`，不得用静态 `os.Getwd()` 值（`SwitchWorkspace` 不会自动同步，见 R7）
+- 配置借用：ivan 的 `api_key` 为空时从 `~/.config/tanya/config.yaml`（可经 `IVAN_TANYA_CONFIG` 指定）借用 `base_url`/`api_key`/`model`；`IVAN_*` 显式设置优先
 - 代码不添加注释，除非用户明确要求
 
 ## 结构（规划，见 `docs/plan.md` §5）
 
 ```
-main.go     CLI：run / send / daemon / status / jobs / logs / config / version
-config/     ivan 配置（内嵌 agent.Config + channels/schedule/daemon/policy 段，yaml + IVAN_*）
-bus/        消息结构与 Bus（抽库候选：零依赖）
-channel/    Channel 接口 + Manager + 注册表；子包 cli/ log/ qq/（抽库候选：仅依赖 bus）
-qqbot/      QQ 开放平台协议实现（抽库候选：零 ivan 依赖，只依赖一个 websocket 库）
-schedule/   作业模型 / 存储 / 调度循环 / 触发投递（抽库候选：仅标准库）
-runner/     会话键 → agent 实例池、回合驱动、事件 → bus、交接自动续跑
-data/       作业/事件/状态/会话索引的原子落盘、单实例锁
-prompt/     system 提示词基座 + 环境段
-docs/       规划与设计文档（plan / reuse-tanya / channels / qq-bot / schedule / sessions / refs-picoclaw）
+main.go               CLI：run（已实现）/ send / daemon / status / jobs / logs / config(已实现) / version(已实现)
+config/               ivan 配置（内嵌 agent.Config + runner 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
+data/                 事件落盘 EventLog（缓冲 + 独立 goroutine + 丢弃计数）[已实现]；作业/状态/锁待建
+prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段 [已实现]
+runner/               装配 agent + 标准工具、事件分流（显示 + 落盘）、前台单发 [已实现 P0 形态]
+probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
+internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与后续测试用 [已实现]
+bus/ channel/ qqbot/ schedule/   规划中（见 docs/plan.md §5）
 ```
 
 ## 文档
@@ -48,10 +49,11 @@ docs/       规划与设计文档（plan / reuse-tanya / channels / qq-bot / sch
 
 ## 构建与测试
 
-规划阶段无代码；P0 起固定为：
-
 ```bash
-go build ./... && go vet ./...          # 构建 + 静态检查
-go test ./... && go test -race ./...    # 全量测试 + 竞态
-go run . run "你好"                      # 前台单发冒烟（需配置 api_key）
+go build ./... && go vet ./...              # 构建 + 静态检查
+go test ./... && go test -race ./...        # 全量测试 + 竞态（probe 用假 LLM，无需网络）
+go test ./probe/ -v -timeout 120s           # 复用探针细项（R1–R11）
+go run . run "你好"                          # 前台单发冒烟（需 api_key，可借用 tanya 配置）
 ```
+
+依赖：`github.com/LaoQi/tanya` 经 `go.work`（`use ./ ../tanya`）与 `go.mod` 的 `replace ../tanya` 本地联调。

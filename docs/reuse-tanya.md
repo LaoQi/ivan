@@ -38,7 +38,7 @@
 |---|---|---|---|
 | T1 | `agent.UserAgentProduct` 常量改为可注入（或 ivan 显式配 `user_agent`） | 否则 ivan 出站请求自称 `tanya/<ver>` | `agent`，小 |
 | T2 | `config.Load` 泛化：路径与 env 前缀参数化（键名与 `TANYA_*` 行为逐字不变） | ivan 需要 `~/.config/ivan/config.yaml` + `IVAN_*` | `config`，中 |
-| T3 | （待探针结论）会话按 session key 归置/查找的薄接口 | ivan 需要按 `qq:c2c:<openid>` 这类键定位会话 | `agent`，视 P0 结论 |
+| T3 | ~~会话按 session key 归置~~ | **P0 结论：不改 tanya**——用"每个会话键一个独立工作区目录"实现隔离（探针 R11），`LoadSession`/`SessionFile` 足够 | 无 |
 
 T1/T2 可等 P1 用到时再做；T3 只有 P0 探针证明现有 `LoadSession` 不足以支撑时才提。
 

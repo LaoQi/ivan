@@ -5,9 +5,10 @@
 ## 1 会话键 → agent 实例
 
 - 每个 `SessionKey`（见 `docs/channels.md` §4）对应一个 `*agent.Agent` 实例；实例内维护 history 与当前会话文件。
+- **每个会话键有独立的工作区目录** `<data_dir>/agents/<key-slug>/`（P0 探针 R11 结论：tanya 会话 id 为秒级时间戳，多实例共享工作区会互相覆盖）。会话文件落该目录下；`run_shell` 的默认目录另由"项目目录"配置提供，不与会话目录耦合。
 - 实例懒创建：首个消息到达时按 `SessionKey` 查映射 → 命中则 `LoadSession(id)` 恢复 → 未命中则 `NewSession()`。
 - 实例池上限与闲置回收（如 32 个 / 闲置 30 分钟）：回收前确保无回合在跑；回收只释放内存，会话文件不动。
-- 实例绑定 workspace（配置 `workspaces` 段：`SessionKey 前缀 → 目录`，默认 `data_dir/workspaces/<name>`），`run_shell` 默认在该目录执行。
+- 装配纪律（P0 探针 R7 结论）：`tools.Options.Workspace` 必须是**动态闭包**指向 `agent.Workspace()`，否则 `SwitchWorkspace` 后命令仍跑在启动目录。
 
 ## 2 映射持久化
 
