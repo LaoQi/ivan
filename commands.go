@@ -579,8 +579,13 @@ func printStatus(st daemon.Status) {
 	if st.Runner.MaxTokensPerDay > 0 {
 		budget = strconv.Itoa(st.Runner.MaxTokensPerDay)
 	}
-	fmt.Printf("budget    tokens_today=%d max_per_day=%s paused=%v hint=%d force=%d\n",
-		st.Runner.TokensToday, budget, st.Runner.Paused, st.Runner.HandoffHint, st.Runner.HandoffForce)
+	memory := "不限"
+	if st.Runner.MemoryMaxBytes > 0 {
+		memory = strconv.Itoa(st.Runner.MemoryMaxBytes)
+	}
+	fmt.Printf("budget    tokens_today=%d max_per_day=%s paused=%v hint=%d force=%d interrupted=%d memory_max=%s\n",
+		st.Runner.TokensToday, budget, st.Runner.Paused, st.Runner.HandoffHint, st.Runner.HandoffForce,
+		st.Runner.Interrupted, memory)
 	for _, c := range st.Channels {
 		line := fmt.Sprintf("channel   %s running=%v max_len=%d sent=%d failed=%d unmatched=%d",
 			c.Name, c.Running, c.MaxLen, c.Sent, c.Failed, c.Unmatched)

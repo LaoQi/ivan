@@ -19,6 +19,7 @@ const (
 	DataDirSuffix             = ".local/share/ivan"
 	ConfigPathSuffix          = ".config/ivan/config.yaml"
 	TanyaConfigPathSuffix     = ".config/tanya/config.yaml"
+	GlobalAgentsSuffix        = ".config/ivan/AGENTS.md"
 	UserAgentURL              = "https://github.com/LaoQi/ivan"
 	EnvPrefix                 = "IVAN_"
 	DefaultSocket             = "ivan.sock"
@@ -41,6 +42,7 @@ type RunnerConfig struct {
 	MaxTurnsPerTask    int  `yaml:"max_turns_per_task"`
 	MaxTokensPerTask   int  `yaml:"max_tokens_per_task"`
 	MaxTokensPerDay    int  `yaml:"max_tokens_per_day"`
+	MemoryMaxBytes     int  `yaml:"memory_max_bytes"`
 	MaxAgents          int  `yaml:"max_agents"`
 	IdleTimeoutMinutes int  `yaml:"idle_timeout_minutes"`
 }
@@ -89,6 +91,7 @@ type Config struct {
 	Daemon        DaemonConfig   `yaml:"daemon"`
 	Channels      ChannelsConfig `yaml:"channels"`
 	Schedule      ScheduleConfig `yaml:"schedule"`
+	GlobalAgents  string         `yaml:"global_agents"`
 	ImageMaxBytes int            `yaml:"image_max_bytes"`
 	ImageResize   bool           `yaml:"image_resize"`
 	Path          string         `yaml:"-"`
@@ -139,6 +142,7 @@ func Default() *Config {
 			MissedPolicy:      "run",
 			JobTimeoutSeconds: DefaultJobTimeoutSeconds,
 		},
+		GlobalAgents:  filepath.Join(home, filepath.FromSlash(GlobalAgentsSuffix)),
 		ImageMaxBytes: agent.DefaultImageMaxBytes,
 		ImageResize:   true,
 		Path:          path,
@@ -202,6 +206,11 @@ func applyEnv(cfg *Config) {
 
 func (c *Config) normalize() {
 	c.DataDir = expandHome(c.DataDir)
+	if strings.TrimSpace(c.GlobalAgents) == "" {
+		home, _ := os.UserHomeDir()
+		c.GlobalAgents = filepath.Join(home, filepath.FromSlash(GlobalAgentsSuffix))
+	}
+	c.GlobalAgents = expandHome(c.GlobalAgents)
 	if strings.TrimSpace(c.Daemon.Socket) == "" {
 		c.Daemon.Socket = DefaultSocket
 	}
@@ -304,6 +313,14 @@ func (c *Config) JobsDBPath() string {
 }
 
 func (c *Config) MemoryDir() string { return filepath.Join(c.DataDir, "memory") }
+
+func (c *Config) GlobalAgentsPath() string {
+	switch strings.ToLower(strings.TrimSpace(c.GlobalAgents)) {
+	case "off", "none", "-":
+		return ""
+	}
+	return c.GlobalAgents
+}
 
 func (c *Config) JobTimeout() time.Duration {
 	return time.Duration(c.Schedule.JobTimeoutSeconds) * time.Second

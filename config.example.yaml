@@ -15,6 +15,9 @@ image_resize: true
 # user_agent: ivan/dev (+https://github.com/LaoQi/ivan)
 # 数据目录（与 tanya 分离；会话落于 <data_dir>/agents/<会话键>/，记忆落 <data_dir>/memory/）
 data_dir: ~/.local/share/ivan
+# 全局说明（AGENTS.md）：随 system prompt 注入，与 tanya 的 ~/.config/tanya/AGENTS.md 隔离；
+# 填 off / none / - 表示不读全局说明；换路径时支持 ~ 展开
+global_agents: ~/.config/ivan/AGENTS.md
 # 会话存储模式：auto / local / global（默认 global，会话集中在 data_dir）
 session_mode: global
 # 启动自动归档（ivan 不主动归档，仅保留配置位）
@@ -37,6 +40,8 @@ runner:
   max_tokens_per_task: 0
   # 当日 token 预算（0 = 不限；含定时作业与自动续跑，落 state.json 跨重启累计）
   max_tokens_per_day: 0
+  # 记忆文件体积上限（字节，0 = 不裁剪）：超限时回合结束按行边界保留最新内容并加裁剪标记
+  memory_max_bytes: 0
   # 会话实例池上限（超出时淘汰最久未用的空闲实例）
   max_agents: 8
   # 空闲实例回收时间（分钟）

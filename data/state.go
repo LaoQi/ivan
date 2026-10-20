@@ -23,12 +23,20 @@ type Usage struct {
 	Tokens int    `json:"tokens,omitempty"`
 }
 
+type RunningTurn struct {
+	Session   string    `json:"session,omitempty"`
+	Channel   string    `json:"channel,omitempty"`
+	ChatID    string    `json:"chat_id,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+}
+
 type stateDoc struct {
 	Version   int                     `json:"version"`
 	UpdatedAt time.Time               `json:"updated_at,omitempty"`
 	Paused    bool                    `json:"paused,omitempty"`
 	Usage     Usage                   `json:"usage,omitempty"`
 	Sessions  map[string]SessionState `json:"sessions"`
+	Running   map[string]RunningTurn  `json:"running,omitempty"`
 }
 
 type State struct {
@@ -91,6 +99,48 @@ func (s *State) Delete(key string) error {
 	}
 	delete(s.doc.Sessions, key)
 	return s.flushLocked()
+}
+
+func (s *State) BeginTurn(key string, rt RunningTurn) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.doc.Running == nil {
+		s.doc.Running = map[string]RunningTurn{}
+	}
+	rt.StartedAt = time.Now()
+	s.doc.Running[key] = rt
+	return s.flushLocked()
+}
+
+func (s *State) EndTurn(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.doc.Running[key]; !ok {
+		return nil
+	}
+	delete(s.doc.Running, key)
+	return s.flushLocked()
+}
+
+func (s *State) Running() map[string]RunningTurn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]RunningTurn, len(s.doc.Running))
+	for k, v := range s.doc.Running {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *State) DrainRunning() (map[string]RunningTurn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.doc.Running) == 0 {
+		return nil, nil
+	}
+	out := s.doc.Running
+	s.doc.Running = nil
+	return out, s.flushLocked()
 }
 
 func (s *State) Paused() bool {

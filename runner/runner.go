@@ -45,17 +45,18 @@ type Runner struct {
 	pool   map[string]*instance
 	sem    chan struct{}
 
-	startedAt time.Time
-	turns     atomic.Uint64
-	failures  atomic.Uint64
-	handoffs  atomic.Uint64
-	continued atomic.Uint64
-	hinted    atomic.Uint64
-	forced    atomic.Uint64
-	cancelled atomic.Uint64
-	dropped   atomic.Uint64
-	inFlight  atomic.Int64
-	closed    atomic.Bool
+	startedAt   time.Time
+	turns       atomic.Uint64
+	failures    atomic.Uint64
+	handoffs    atomic.Uint64
+	continued   atomic.Uint64
+	hinted      atomic.Uint64
+	forced      atomic.Uint64
+	interrupted atomic.Uint64
+	cancelled   atomic.Uint64
+	dropped     atomic.Uint64
+	inFlight    atomic.Int64
+	closed      atomic.Bool
 
 	wg          sync.WaitGroup
 	turnCtx     context.Context
@@ -63,6 +64,9 @@ type Runner struct {
 
 	schedMu sync.RWMutex
 	sched   *schedule.Scheduler
+
+	pendingMu sync.Mutex
+	pending   map[string]string
 }
 
 type AgentStatus struct {
@@ -83,10 +87,12 @@ type Status struct {
 	DroppedOutbound uint64        `json:"dropped_outbound"`
 	Hinted          uint64        `json:"hinted"`
 	Forced          uint64        `json:"forced"`
+	Interrupted     uint64        `json:"interrupted"`
 	HandoffHint     int           `json:"handoff_hint_tokens"`
 	HandoffForce    int           `json:"handoff_force_tokens"`
 	TokensToday     int           `json:"tokens_today"`
 	MaxTokensPerDay int           `json:"max_tokens_per_day"`
+	MemoryMaxBytes  int           `json:"memory_max_bytes"`
 	Paused          bool          `json:"paused"`
 	InFlight        int64         `json:"in_flight"`
 	Agents          int           `json:"agents"`
@@ -115,6 +121,7 @@ func New(opts Options) (*Runner, error) {
 		startedAt: time.Now(),
 	}
 	r.turnCtx, r.cancelTurns = context.WithCancel(context.Background())
+	r.recoverInterrupted()
 	if idle := opts.Cfg.IdleTimeout(); idle > 0 {
 		go r.reapLoop(idle)
 	}
@@ -141,6 +148,8 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 	inst.turns++
 	inst.setTarget(replyChannel(msg), msg.ChatID, key)
 	r.inFlight.Add(1)
+	r.beginTurn(key, msg)
+	defer r.endTurn(key)
 	defer r.inFlight.Add(-1)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -214,6 +223,84 @@ func (r *Runner) CancelTurn(key string) bool {
 	cancel()
 	r.note("cancel", key)
 	return true
+}
+
+func (r *Runner) beginTurn(key string, msg bus.InboundMessage) {
+	if r.opts.State == nil {
+		return
+	}
+	rt := data.RunningTurn{Channel: msg.Channel, ChatID: msg.ChatID}
+	if st, ok := r.opts.State.Get(key); ok {
+		rt.Session = st.SessionID
+	}
+	if err := r.opts.State.BeginTurn(key, rt); err != nil {
+		r.notice("写入回合标记失败 key=%s: %v", key, err)
+	}
+}
+
+func (r *Runner) endTurn(key string) {
+	if r.opts.State == nil {
+		return
+	}
+	if err := r.opts.State.EndTurn(key); err != nil {
+		r.notice("清理回合标记失败 key=%s: %v", key, err)
+	}
+	r.trimMemory(key)
+}
+
+func (r *Runner) recoverInterrupted() {
+	if r.opts.State == nil {
+		return
+	}
+	left, err := r.opts.State.DrainRunning()
+	if err != nil {
+		r.notice("清理残留回合标记失败: %v", err)
+		return
+	}
+	for key, rt := range left {
+		r.interrupted.Add(1)
+		when := rt.StartedAt.Local().Format("2006-01-02 15:04:05")
+		text := fmt.Sprintf("回合执行中进程退出：会话 %s（来源 %s/%s，开始于 %s），该回合结果未知", key, rt.Channel, rt.ChatID, when)
+		r.human(chlog.Event{Kind: "turn_interrupted", Session: key, Channel: rt.Channel, Text: text})
+		r.note("turn_interrupted", text)
+		r.setPending(key, fmt.Sprintf(interruptedNotice, rt.Channel, when))
+	}
+}
+
+func (r *Runner) setPending(key, text string) {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if r.pending == nil {
+		r.pending = map[string]string{}
+	}
+	r.pending[key] = text
+}
+
+func (r *Runner) takePending(key string) string {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	text := r.pending[key]
+	delete(r.pending, key)
+	return text
+}
+
+func (r *Runner) trimMemory(key string) {
+	max := r.cfg.Runner.MemoryMaxBytes
+	if max <= 0 {
+		return
+	}
+	path := r.memoryPath(key)
+	removed, err := data.TrimFileTail(path, max)
+	if err != nil {
+		r.notice("裁剪记忆文件失败 %s: %v", path, err)
+		return
+	}
+	if removed <= 0 {
+		return
+	}
+	text := fmt.Sprintf("记忆文件超过 %d 字节，已裁剪 %d 字节（保留最近内容）", max, removed)
+	r.human(chlog.Event{Kind: "memory_trim", Session: key, Text: text})
+	r.note("memory_trim", key+" "+text)
 }
 
 func (r *Runner) paused() bool {
@@ -381,10 +468,12 @@ func (r *Runner) Status() Status {
 		DroppedOutbound: r.dropped.Load(),
 		Hinted:          r.hinted.Load(),
 		Forced:          r.forced.Load(),
+		Interrupted:     r.interrupted.Load(),
 		HandoffHint:     r.cfg.Runner.HandoffHintTokens,
 		HandoffForce:    r.cfg.Runner.HandoffForceTokens,
 		TokensToday:     r.TokensToday(),
 		MaxTokensPerDay: r.cfg.Runner.MaxTokensPerDay,
+		MemoryMaxBytes:  r.cfg.Runner.MemoryMaxBytes,
 		Paused:          r.paused(),
 		InFlight:        r.inFlight.Load(),
 		MaxAgents:       r.cfg.Runner.MaxAgents,
@@ -494,6 +583,11 @@ func (t *task) run(ctx context.Context) error {
 		sink := agent.Sinks(t.sink, t.r.logEvent)
 		t.r.human(chlog.Event{Kind: "turn_start", Session: t.key, Channel: t.msg.Channel, Text: turnLabel(turn)})
 		if turn == 0 {
+			if text := t.r.takePending(t.key); text != "" {
+				if err := ag.AppendNotice(text); err != nil {
+					t.r.notice("注入中断提示失败 key=%s: %v", t.key, err)
+				}
+			}
 			err = ag.Ask(ctx, promptOf(t.msg), sink)
 		} else {
 			err = ag.Continue(ctx, sink)
@@ -566,6 +660,8 @@ func (t *task) run(ctx context.Context) error {
 		t.r.note(kind, t.key+" "+text)
 	}
 }
+
+const interruptedNotice = "系统提示：上一次回合在执行中因进程退出被中断（来源 %s，开始于 %s），其结果未知。继续之前先核对工作区与实际状态的进展，不要假定上一步已完成。"
 
 const handoffHintNotice = "系统提示：本会话上下文已到 %d tokens（建议交接阈值 %d）。建议在本阶段收尾后调用 next_session 交接进度（summary 写清已完成内容、关键结论与下一步）；若目标马上就能完成，可先把当前步骤做完再交接。"
 

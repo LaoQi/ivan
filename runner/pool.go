@@ -175,6 +175,7 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 			Goals:     filepath.Join(inst.ws, "GOALS.md"),
 		})),
 		agent.WithTools(list...),
+		agent.WithGlobalAgentsPath(r.cfg.GlobalAgentsPath()),
 	)
 	if err != nil {
 		return nil, err

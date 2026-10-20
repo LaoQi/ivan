@@ -186,3 +186,27 @@ func TestHandoffTierValidation(t *testing.T) {
 		t.Fatalf("强制档小于建议档应报错，得到 %v", err)
 	}
 }
+
+func TestGlobalAgentsPath(t *testing.T) {
+	cfg := Default()
+	home, _ := os.UserHomeDir()
+	if want := filepath.Join(home, filepath.FromSlash(GlobalAgentsSuffix)); cfg.GlobalAgentsPath() != want {
+		t.Fatalf("默认全局说明路径 = %q，期望 %q", cfg.GlobalAgentsPath(), want)
+	}
+	if !strings.Contains(cfg.GlobalAgentsPath(), "/.config/ivan/AGENTS.md") {
+		t.Fatalf("默认路径应指向 ivan 自己的配置目录: %q", cfg.GlobalAgentsPath())
+	}
+
+	for _, off := range []string{"off", "OFF", "none", "-", "  off  "} {
+		cfg.GlobalAgents = off
+		if got := cfg.GlobalAgentsPath(); got != "" {
+			t.Fatalf("%q 应禁用全局说明，实际 %q", off, got)
+		}
+	}
+
+	cfg.GlobalAgents = "~/my/agents.md"
+	cfg.normalize()
+	if cfg.GlobalAgentsPath() != filepath.Join(home, "my", "agents.md") {
+		t.Fatalf("~ 未展开: %q", cfg.GlobalAgentsPath())
+	}
+}
