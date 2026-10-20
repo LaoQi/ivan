@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P2 已完成**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线；生产凭证真机单聊全链路已验证，群 @/图片待验）；下一步 P3（定时与计划任务）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
+> 状态：**P3 已完成**（`schedule/` 作业模型 + 调度循环、`schedule/sqlite` 存储实现、`schedule` 工具、daemon 接线、`ivan jobs`/`pause`/`resume`；单测与 daemon 端到端全绿，QQ 真机"到点提醒"待用户在场实测）；下一步 P4（受控推进）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
 
 ## 设计约束
 
@@ -11,12 +11,14 @@
 - 复用 tanya：以库方式依赖 `agent` 与 `tools`（本地 `../tanya`，`go.work` 联调）；**不复用** `repl`/`readline`/终端所有权（常驻无 TTY 场景）。需要的能力缺口在 tanya 侧小步补齐，两仓库 CHANGELOG 同步
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 tanya（`bus`+`channel` 抽库时成对抽出）
+- **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
-- 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`
+- 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
 - `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
 - 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；危险命令最小黑名单拦截；AppSecret 不进日志/事件/错误信息
+- 定时作业：触发由 runner **同步**执行（`Runner.TriggerJob`），作业状态以真实回合结果为准；出站按 `InboundMessage.ReplyChannel` **直投**（不走 Bus）以便拿到投递错误；作业目标会话只由 runner 注入，模型不可指定；配额默认不限
 - 持久化一律原子写（临时文件 + fsync + rename）；解析失败保留原文件并显式报错，**不静默重建**
 - 启动拒绝 root（复用 `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致
 - 部署纪律：部署态只做只读探测；功能验证在本地或临时环境完成
@@ -48,7 +50,8 @@ probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
 qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
 channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、msg_seq 计数、图片下载/上传、白名单 [已实现]
-schedule/             规划中（见 docs/plan.md §5，P3）
+schedule/             作业模型（at/every）、存储抽象 Store + 进程内实现、调度循环（wake/timer、错过策略、暂停与预算闸门）[已实现]
+schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_version 迁移、损坏不重建）[已实现]
 ```
 
 ## 文档
@@ -64,7 +67,7 @@ schedule/             规划中（见 docs/plan.md §5，P3）
 ## 构建与测试
 
 ```bash
-go build ./... && go vet ./...              # 构建 + 静态检查
+go build ./... && go vet ./...              # 构建 + 静态检查（首次需拉 modernc.org/sqlite 及其依赖）
 go test ./... && go test -race ./...        # 全量测试 + 竞态（probe/runner/daemon 用假 LLM，无需网络）
 go test ./probe/ -v -timeout 120s           # 复用探针细项（R1–R11）
 go run . run "你好"                          # 前台单发冒烟（需 api_key，可借用 tanya 配置）
@@ -73,7 +76,9 @@ go run . run "你好"                          # 前台单发冒烟（需 api_ke
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . daemon &
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "用 run_shell 跑 pwd 并只回答目录名"
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . status
-pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾）
+IVAN_DATA_DIR=/tmp/ivan-smoke go run . jobs        # 作业列表（直接读作业库）
+IVAN_DATA_DIR=/tmp/ivan-smoke go run . pause       # 暂停定时触发
+pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 
 依赖：`github.com/LaoQi/tanya` 经 `go.work`（`use ./ ../tanya`）与 `go.mod` 的 `replace ../tanya` 本地联调。

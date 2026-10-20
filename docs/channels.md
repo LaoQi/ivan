@@ -35,6 +35,7 @@ type InboundMessage struct {
     Media     []MediaRef // 图片等附件引用（本地缓存路径 + mime）
     Mentioned bool       // 群里是否 @ 了机器人
     SessionKey string    // 由通道或 runner 归一：见 §4
+    ReplyChannel string  // 回投通道（触发源专用：非空表示出站直投该通道而非来源通道）
     ReceivedAt time.Time
     Raw       map[string]string // 平台原始字段（调试与被动回复用，如 msg_id）
 }
@@ -109,7 +110,7 @@ socket 协议：**JSON Lines**，一行一帧（单帧上限 1 MiB），字段 `
 
 ### schedule / heartbeat（触发源，不是传统通道）
 
-调度器产生的消息以 `Channel: "schedule"` 注入 Bus，但 **`ChatID`/`SessionKey` 指向目标会话**，出站时由 Manager 改投到真实通道（QQ/cli）。心跳（后置）同构，只是触发者是无人在场时的定时自省。
+调度器产生的消息以 `Channel: "schedule"` 标记来源，`ChatID`/`SessionKey` 指向目标会话，`ReplyChannel` 记真实回投通道（P3 起）。**它不经 Bus**：`runner.TriggerJob` 同步执行，出站按 `ReplyChannel` 直投 `Manager.Route` 以便拿到投递错误（见 `docs/schedule.md` §8.1）。心跳（后置）同构，只是触发者是无人在场时的定时自省。
 
 ### webhook（后置）
 

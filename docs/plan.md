@@ -1,6 +1,6 @@
 # ivan 规划总纲
 
-> 状态：**P0、P1 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon）；**P2 已完成**（`qqbot/` 协议包 + `channel/qq` 适配器，单聊全链路真机验证通过、群 @ 待验）；下一步 P3。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
+> 状态：**P0–P3 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon、P2 `qqbot/` + `channel/qq` 真机全通、P3 定时与计划任务）；下一步 P4（受控推进）。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
 
 ## 1 定位
 
@@ -57,11 +57,12 @@ main.go            CLI：run(前台单发) / send / daemon / status / jobs / log
 config/            内嵌 agent.Config + channels + schedule + daemon + policy 段（yaml + IVAN_*）
 bus/               InboundMessage / OutboundMessage / Bus（带缓冲、非阻塞、可观测丢弃计数）
 channel/           Channel 接口 + Manager + 注册表；子包 cli/ log/ qq/
-schedule/          Job 模型 / 存储 / 调度循环 / 触发投递；配套 schedule 工具
+schedule/          Job 模型 / 存储抽象 + 进程内实现 / 调度循环（at|every）
 runner/            会话键 → *agent.Agent 池、回合驱动、事件 → bus、交接自动续跑
 data/              作业/事件/状态/会话索引的原子落盘（jsonl + flock 单实例锁）
 prompt/            system 提示词基座 + 环境段（动态内容走 user 消息，保 prompt cache 不变性）
 qqbot/             QQ 开放平台协议实现（token / gateway / websocket / 开放 API / 事件类型）
+schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite 驱动的包）
 ```
 
 **抽库候选**（隔离规则：这些包只依赖标准库与自身类型，不得依赖 ivan 其他包与 tanya）
@@ -71,7 +72,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 | `qqbot/` | 纯协议，零 ivan 依赖，只暴露自身类型与回调 | **首个抽出对象**：P2 真机跑通、接口稳定后抽为 `github.com/LaoQi/qqbot` |
 | `bus/` | 纯消息结构 + 通道，零依赖 | 暂留（只有一个消费者，抽库是纯成本） |
 | `channel/` | 仅依赖 `bus` | 暂留，接口随 P1–P4 演进 |
-| `schedule/` | 仅依赖标准库 + 自身 Job 类型 | 暂留（视是否出现第二消费者） |
+| `schedule/` | 仅依赖标准库 + 自身 Job 类型（存储实现另放子包，驱动依赖不下沉） | 暂留（视是否出现第二消费者） |
 
 `channel/qq/` 是适配器：把 `qqbot/` 的协议事件翻译成 `bus.InboundMessage`，把 `bus.OutboundMessage` 翻回协议调用。**协议与业务的分界固定在 `qqbot/` 边界上**，抽库时 ivan 只改 import 路径。
 
@@ -80,8 +81,8 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 ```
 <data_dir>/                       默认 ~/.local/share/ivan（与 tanya 分离，互不干扰）
   ivan.sock                       daemon 的 unix socket（cli 通道）
-  state.json                      运行状态：会话映射、暂停开关、预算计数
-  jobs.json                       计划任务（原子写）
+  state.json                      运行状态：会话映射、暂停开关
+  jobs.db                         计划任务（sqlite：WAL+FULL，schema 版本随程序迁移）
   events/<date>.jsonl             结构化事件日志（回合/工具/错误）
   logs/ivan.log                   进程日志
   media/                          收发媒体缓存（图片）
@@ -105,7 +106,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 | P0 | 复用探针 + 仓库骨架：go.work、config、`ivan run` 前台单发 + 事件日志 | 无 TTY 下 `run_shell` 正常、`interactive` 明确报错不卡、交接自动续跑、`LoadSession` 恢复、多实例并发；产出 `docs/reuse-probe.md` |
 | P1 | `bus` + `channel` 抽象 + `cli`/`log` 通道 + daemon（socket、单实例锁、优雅停机、status） | ✅ 两个通道跑通；daemon 重启后状态可查、会话可续（`docs/channels.md` §10、`docs/sessions.md` §9） |
 | P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**单聊全链路已通**（入站→回合→回复），群 @/图片待验（`docs/qq-bot.md` §13） |
-| P3 | 定时与计划任务：Job 存储、调度循环、`schedule` 工具、结果回原渠道 | 重启后作业恢复；模型自建任务按时触发并把结果发回会话 |
+| P3 | 定时与计划任务：Job 存储（抽象 + sqlite）、调度循环、`schedule` 工具、结果回原渠道 | ✅ 重启后作业恢复；模型自建 `at`/`every` 作业按时触发并把结果发回原会话（本地端到端全绿，QQ 真机提醒待验；`docs/schedule.md` §8） |
 | P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接、按需读取的记忆/目标文件、预算熔断、暂停开关 | 在指定低风险工作区开启后，单条消息触发能跨会话推进并被轮次/预算/暂停约束住；不承诺无人值守完成开放目标 |
 | P5 | 安全与运维：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 危险命令被拦；服务随 systemd 起停 |
 
@@ -120,6 +121,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 | D5 | 定时表达式 | `at`/`every` 先做，`cron_expr` 视需要再规划 |
 | D6 | 与 tanya 关系 | 共用 agent 核心，两仓库同步推进；公共模块后续按 §5 判据抽库 |
 | D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；webhook、心跳为后置可选 |
+| D8 | 作业存储 | **存储抽象接口 + sqlite 实现**（`modernc.org/sqlite`，纯 Go 无 cgo）：文件级重写不够可靠，作业状态需要事务与并发安全；接口保持窄（List/Get/Put/Delete/Close），换实现不动调度器 |
 
 ## 10 风险与红线
 
@@ -136,7 +138,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 - `docs/reuse-tanya.md` 复用清单、P0 探针与需 tanya 配合的改动
 - `docs/channels.md` 通道抽象、Bus 与消息模型、cli 通道
 - `docs/qq-bot.md` QQ 官方机器人协议设计、实现分层与抽库路径
-- `docs/schedule.md` 定时与计划任务设计
+- `docs/schedule.md` 定时与计划任务设计与 P3 实现记录（§8）
 - `docs/sessions.md` 会话模型、agent 实例池与推进策略
 - `docs/refs-picoclaw.md` 参考调研快照与取舍
 - 根 `AGENTS.md` 现行约束与结构；`CHANGELOG.md` 变更记录
