@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P4 已完成**（上下文两档阈值自动交接（建议 180K / 强制 256K）、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`）。P0–P3 见前：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。下一步 P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10。
+> 状态：**P0–P4 已完成**（P4：两档阈值自动交接 建议 180K / 强制 256K、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`；P4 遗留的崩溃回合 `interrupted` 标记与记忆文件裁剪已补齐）。P0–P3：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。**P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）为保留计划，暂无实施规划**——相关子项均未实施，不要按"已交付"引用。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10。
 
 ## 设计约束
 
@@ -17,7 +17,10 @@
 - `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
 - 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
-- 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；危险命令最小黑名单拦截；AppSecret 不进日志/事件/错误信息
+- **全局说明与实际隔离**：system prompt 的"全局说明"段只读 ivan 自己的 `~/.config/ivan/AGENTS.md`（配置项 `global_agents`，`off` 禁用），**不读 tanya 的 `~/.config/tanya/AGENTS.md`**（经 tanya `agent.WithGlobalAgentsPath` 注入；机制保留、位置隔离）
+- 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；AppSecret 不进日志/事件/错误信息。**危险命令黑名单与审批档属 P5 保留计划，当前未实施**（缓解只有限定工作区 + 预算 + 暂停 + 事件审计）
+- 崩溃回合：`DispatchTurn` 期间在 `state.json` 留 `running` 标记，启动时 `DrainRunning` 清残留、记 `turn_interrupted`、并在该会话下一次回合注入"上次回合被中断、先核对实际状态"的提示（只注入一次）
+- 记忆裁剪：`runner.memory_max_bytes`（默认 0=不裁剪），回合结束后按行边界保留尾部 + 头部裁剪标记（`data.TrimFileTail`）
 - 交接阈值两档（绝对值，`handoff_hint_tokens` 180K / `handoff_force_tokens` 256K）：建议档只提示、强制档要求立即交接且不交接就停（不再发请求）；两档每任务各触发一次，且都受暂停/预算闸门
 - 预算只在一处统计：`runner`（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日用量落 `state.json` 跨进程累计），调度器用注入的 `Budget` 回调复用；不要再加第二个预算口径
 - 暂停语义：`paused` 只挡**无人值守路径**（定时作业触发、交接后自动续跑、阈值交接提示），用户主动消息照常处理
@@ -46,9 +49,9 @@ bus/                  消息模型 + Bus（两条缓冲流、非阻塞投递、�
 channel/              Channel 接口 + Manager（路由、清理、切分、重试、状态）+ ErrUnroutable [已实现]
 channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping）+ 客户端（ivan send/status 用）[已实现]
 channel/log/          人类可读 Sink（io.Writer，stdlib 依赖）[已实现]
-data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写）/ Lock（flock）/ LogFile / ProcessAlive [已实现]
-prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段（含会话键、记忆文件、目标文件路径）[已实现]
-runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消）+ 回合驱动与事件分流 + 阈值交接提示/预算暂停闸门/schedule 工具 [已实现]
+data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写，含会话映射、暂停、日用量、回合进行中标记）/ Lock（flock）/ LogFile / ProcessAlive / TrimFileTail（按行裁剪）[已实现]
+prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段（含会话键、记忆文件、目标文件路径）；全局说明由 `config.global_agents` 注入（默认 `~/.config/ivan/AGENTS.md`）[已实现]
+runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消）+ 回合驱动与事件分流 + 阈值交接提示/预算暂停闸门/schedule 工具 + 崩溃回合恢复（`interrupted`）/记忆裁剪 [已实现]
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]

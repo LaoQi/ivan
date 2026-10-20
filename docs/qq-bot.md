@@ -2,7 +2,7 @@
 
 > 状态：规划。接入 QQ 开放平台**官方机器人**（不走 OneBot）。协议自实现（D3）。
 > 状态：**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线）。协议事实已核对（文档抓取 + 真机实测），结论见 §10；凭证来源见 §12；
-> 实现记录见 §13。真机**单聊全链路已验证**（入站→runner 回合→被动回复），**群 @ 待验证**。
+> 实现记录见 §13。真机**P2 全部能力已验证**：单聊全链路（入站→runner 回合→被动回复）、群 @、图片收发（内联 + 分片）、去重、重连。
 
 ## 1 范围
 
@@ -185,7 +185,7 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 - `Config{AppID, AppSecret, AllowFrom, AllowGroups, MaxMessageLen, AllowProactive, ReconnectMax, MediaDir, MediaMaxBytes, Timeout, APIBase/TokenURL/GatewayURL, Logf, HTTPClient}`。
 - 入站：`C2C_MESSAGE_CREATE`→`ChatType=direct`（`ChatID=user_openid`）、`GROUP_AT_MESSAGE_CREATE`→`group`（`ChatID=group_openid`，`Mentioned=true`）；`Raw` 带 `msg_id`；白名单（`allow_from`/`allow_groups`，空=放行）；附件下载到 `media/` 转 `MediaRef`（`MediaMaxBytes` 截断、0600）。
 - 出站：解析目标（优先用入站登记的 openid/group）；**`msg_seq` 以入站 `msg_id` 为键**计数，单聊窗口 60 分钟/上限 4、群聊 5 分钟/上限 5，超限且未开 `allow_proactive` 则报错；有 `msg_id` 走被动回复，否则（`allow_proactive`）走主动消息。
-- 图片：出站先 `/files` 上传（`file_type:1`、`srv_send_msg:false`）取 `file_info`，再 `msg_type:7` 发送；**分片上传本期未实现**（>5MB 直接报错，留待后续）。
+- 图片：出站先 `/files` 上传（`file_type:1`、`srv_send_msg:false`）取 `file_info`，再 `msg_type:7` 发送；`≤5MB` 走 `file_data` 内联，`>5MB` 走**四步分片上传**（`upload_prepare` → 逐片 `PUT` → `upload_part_finish` → `files` 合并，见 §13.1；分片 `index` 实测从 **1** 开始）；媒体上限默认 20MB。
 - `MaxLen()=max_message_len`（默认 1200），出站走通用切分器。
 
 ### 13.3 测试

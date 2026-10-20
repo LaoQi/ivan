@@ -1,6 +1,6 @@
 # ivan 规划总纲
 
-> 状态：**P0–P4 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon、P2 `qqbot/` + `channel/qq` 真机全通、P3 定时与计划任务、P4 受控推进）；下一步 P5（安全与运维）。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
+> 状态：**P0–P4 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon、P2 `qqbot/` + `channel/qq` 真机全通、P3 定时与计划任务、P4 受控推进）；**P5（安全与运维）降级为保留计划，暂无实施规划**（见 §8）。P4 遗留的崩溃回合标记、记忆裁剪已补齐（`docs/sessions.md` §10.7）。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
 
 ## 1 定位
 
@@ -60,7 +60,7 @@ channel/           Channel 接口 + Manager + 注册表；子包 cli/ log/ qq/
 schedule/          Job 模型 / 存储抽象 + 进程内实现 / 调度循环（at|every）
 runner/            会话键 → *agent.Agent 池、回合驱动、事件 → bus、交接自动续跑
 data/              作业/事件/状态/会话索引的原子落盘（jsonl + flock 单实例锁）
-prompt/            system 提示词基座 + 环境段（动态内容走 user 消息，保 prompt cache 不变性）
+prompt/            system 提示词基座 + 环境段（动态内容走 user 消息，保 prompt cache 不变性）；全局说明读 ivan 自己的 ~/.config/ivan/AGENTS.md，与 tanya 隔离
 qqbot/             QQ 开放平台协议实现（token / gateway / websocket / 开放 API / 事件类型）
 schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite 驱动的包）
 ```
@@ -81,7 +81,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 ```
 <data_dir>/                       默认 ~/.local/share/ivan（与 tanya 分离，互不干扰）
   ivan.sock                       daemon 的 unix socket（cli 通道）
-  state.json                      运行状态：会话映射、暂停开关、当日 token 用量
+  state.json                      运行状态：会话映射、暂停开关、当日 token 用量、回合进行中标记（崩溃后据此判定 interrupted）
   memory/<key-slug>.md            每会话记忆（模型按需读、追加；路径进 system prompt）
   jobs.db                         计划任务（sqlite：WAL+FULL，schema 版本随程序迁移）
   events/<date>.jsonl             结构化事件日志（回合/工具/错误）
@@ -94,7 +94,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 
 ## 7 运行形态
 
-- `ivan daemon`：常驻前台进程；systemd user unit 托管（示例随 P5 交付）；单实例锁（`data/` 下 flock，第二实例明确报错退出）。
+- `ivan daemon`：常驻前台进程；单实例锁（`data/` 下 flock，第二实例明确报错退出）；托管方式自定（systemd user unit 示例属 P5 保留计划，当前未提供）。
 - `ivan run "prompt"`：前台单发（不起 daemon，直接跑一个回合），调试与无 QQ 时的主入口。
 - `ivan send "..."`：投递给运行中的 daemon（走 `cli` 通道），由 daemon 异步处理与回复。
 - `ivan status` / `jobs` / `logs`：只读查询（socket 或直接读文件）。
@@ -109,7 +109,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**单聊全链路已通**（入站→回合→回复），群 @/图片待验（`docs/qq-bot.md` §13） |
 | P3 | 定时与计划任务：Job 存储（抽象 + sqlite）、调度循环、`schedule` 工具、结果回原渠道 | ✅ 重启后作业恢复；模型自建 `at`/`every` 作业按时触发并把结果发回原会话（本地端到端全绿 + **QQ 真机提醒通过**；`docs/schedule.md` §8） |
 | P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接（建议 180K / 强制 256K 两档）、按需读取的记忆/目标文件、预算熔断、暂停开关 | ✅ 开启 `auto_continue` 后单条消息可跨会话推进，且被轮次/任务预算/日预算/暂停四处闸门约束；上下文达建议档提示交接、达强制档要求立即交接（不交接则停）（`docs/sessions.md` §10） |
-| P5 | 安全与运维：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 危险命令被拦；服务随 systemd 起停 |
+| P5 | ⏸ **保留计划（暂无实施规划）**：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 未验收。P5 各子项当前**均未实施**；「危险命令被拦」「服务随 systemd 起停」不构成本阶段的现行承诺。重新启动时先补设计（审批在常驻无 TTY 场景下的交互路径是首要分歧点） |
 
 ## 9 决策记录
 
@@ -124,13 +124,14 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；webhook、心跳为后置可选 |
 | D8 | 作业存储 | **存储抽象接口 + sqlite 实现**（`modernc.org/sqlite`，纯 Go 无 cgo）：文件级重写不够可靠，作业状态需要事务与并发安全；接口保持窄（List/Get/Put/Delete/Close），换实现不动调度器 |
 | D9 | 预算与暂停口径 | 预算**只在 runner 一处**统计（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日量落 `state.json`），调度器通过 `Budget` 回调复用，不再自带计数器；`paused` 只挡无人值守路径（定时触发、自动续跑、阈值交接提示），用户消息照常处理 |
+| D10 | 全局说明（AGENTS.md） | **机制保留、位置隔离**：tanya 的 `agent` 会在 system prompt 末尾拼"全局说明 + 项目说明"，默认读 `~/.config/tanya/AGENTS.md`；ivan 经 `agent.WithGlobalAgentsPath` 改读自己的 `~/.config/ivan/AGENTS.md`（`global_agents` 可改路径，`off` 禁用），避免 tanya 的偏好串入无人值守代理；项目说明仍读会话工作区下的 `AGENTS.md` |
 
 ## 10 风险与红线
 
 - **成本失控**：自主续跑 + 定时任务会持续烧 token。预算熔断与暂停开关属于 P4 的硬性交付项，不得后置；建议 P3 前先落最小限额。
 - **静默失败**：无人值守时错误容易无人知晓。事件日志必须落盘，`task/job` 失败要有状态与通知出口。
-- **无人审批执行 shell**：默认 `auto` 档风险高，P5 提供 `guard` 档；危险命令规则先以最小黑名单起步。
-- **协议漂移**：QQ 开放平台接口可能变动，客户端需要可观测的协议错误（日志 + `ivan doctor`）。
+- **无人审批执行 shell**：默认 `auto` 档风险高；`guard` 档与危险命令黑名单属 P5 保留计划，**当前无拦截**，缓解手段只有「限定工作区 + 预算上限 + 暂停开关 + 事件审计」。
+- **协议漂移**：QQ 开放平台接口可能变动，客户端需要可观测的协议错误（日志已有结构化分类与计数；`ivan doctor` 属 P5 保留计划，未实施）。
 - **队列/作业文件损坏**：一律原子写（临时文件 + rename）；解析失败时保留原文件并显式报错，不静默重建。
 - **不越界**：部署态只做只读探测；功能验证在本地或临时环境完成。
 

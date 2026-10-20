@@ -36,11 +36,12 @@
 
 | # | 改动 | 理由 | 影响面 |
 |---|---|---|---|
-| T1 | `agent.UserAgentProduct` 常量改为可注入（或 ivan 显式配 `user_agent`） | 否则 ivan 出站请求自称 `tanya/<ver>` | `agent`，小 |
-| T2 | `config.Load` 泛化：路径与 env 前缀参数化（键名与 `TANYA_*` 行为逐字不变） | ivan 需要 `~/.config/ivan/config.yaml` + `IVAN_*` | `config`，中 |
+| T1 | ~~`agent.UserAgentProduct` 常量改为可注入~~ | **已关闭（不需要）**：`agent.Config.UserAgent` 本就是配置项且透传到 LLM 请求头，ivan 侧填 `config.UserAgent(version)`（`ivan/<ver> (+repo)`），QQ 侧另有 `qqbot.Config.UserAgent` | 无 |
+| T2 | ~~`config.Load` 泛化：路径与 env 前缀参数化~~ | **已关闭（不需要）**：P0 起 ivan 自实现 `config/`（yaml + `IVAN_*` + 借用 tanya 凭证），不复用 tanya 的 config 包 | 无 |
+| T4 | `newPromptBuilder` 的全局说明路径可注入（`agent.WithGlobalAgentsPath`，空串=禁用，标题按实际路径显示） | ivan 需要读自己的 `~/.config/ivan/AGENTS.md`，不能混用 tanya 的全局说明 | `agent`，小（**已实施**） |
 | T3 | ~~会话按 session key 归置~~ | **P0 结论：不改 tanya**——用"每个会话键一个独立工作区目录"实现隔离（探针 R11），`LoadSession`/`SessionFile` 足够 | 无 |
 
-T1/T2 可等 P1 用到时再做；T3 只有 P0 探针证明现有 `LoadSession` 不足以支撑时才提。
+T1/T2/T3 **均已关闭**（T1 由配置满足、T2 由 ivan 自实现替代、T3 由「每会话独立工作区」实现）；**T4 已实施**（tanya `agent.WithGlobalAgentsPath` + ivan `config.global_agents`，见 `docs/plan.md` D10）。当前**无待 tanya 配合的改动**，新增项须先在此登记。
 
 ## 4 P0 探针清单
 

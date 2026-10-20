@@ -83,7 +83,7 @@ Inbound → runner.dispatch(msg)
 4. **出站**：任务级聚合（`auto_continue` 的多轮也合成一条），`Channel/ChatID/ReplyTo` 复制自入站消息 → 回到来源渠道；出错时 `Kind=error` 且失败文本兜底。
 5. **映射**：`state.json` 记 `SessionKey → {session_id, workspace, updated_at}`，回合结束与交接后原子写（临时文件 + fsync + rename，0600）；解析失败**拒绝启动**并保留原文件。
 6. **交接**：`TakeHandoff()` → 立即更新映射。`auto_continue`（默认**关**）开启时才 `Continue`，且受 `max_turns_per_task` 与 `max_tokens_per_task`（0=不限）双重熔断，超限落 `budget` 日志后安静停下。
-7. **重启恢复**：映射恢复走 `LoadSession`；映射存在但会话文件丢失（`SessionDir` 下找不到）时回退新建并记 warn + 清映射。**未做**：崩溃后回合的 `interrupted` 标记（P4 与暂停开关一起）。
+7. **重启恢复**：映射恢复走 `LoadSession`；映射存在但会话文件丢失（`SessionDir` 下找不到）时回退新建并记 warn + 清映射。崩溃回合的 `interrupted` 标记已补齐（见 §10.7）。
 8. **仍待办（P4）**：上下文阈值自动交接、跨 handoff 的预算累计（tanya `Stats` 在交接后 reset）、`ivan cancel <session>`。（P4 已全部补齐，见 §10）
 
 ## 10 P4 实现记录（2026-10-20）
@@ -96,4 +96,7 @@ Inbound → runner.dispatch(msg)
 4. **取消**：实例持当前回合 `context.CancelFunc`，`CancelTurn(key)` 取消并返回是否有在跑回合；`ivan cancel <会话键>` 经 socket 调用。
 5. **记忆/目标**：`prompt.Info{Workspace,DataDir,Session,Memory,Goals}`；记忆路径 `<data_dir>/memory/<key-slug>.md`、目标 `<workspace>/GOALS.md`；`system_prompt.md` 增"记忆与目标"行为约定（按需读、一行一条追加、不删未确认条目）。
 6. **测试**：`runner/p4_test.go`（阈值提示注入到第二轮且首轮不带、每任务只提示一次、未超阈值不提示、暂停不提示、暂停不续跑、正常续跑、日预算停续跑 + 跨进程累计、`CancelTurn` 真取消 httptest 阻塞请求、系统提示含记忆/目标路径）、`data`（日用量累加/跨日清零/重启保留）、`daemon`（`cancel` 参数与空闲报错、`pause/resume` 反映到 `status.runner.paused`）。
-7. **仍待办**：崩溃后回合的 `interrupted` 标记（需要回合级落盘，随 P5 一起）、记忆文件自动裁剪、按会话的工作区白名单（目前"指定低风险工作区"靠人配置 `data_dir`/工作区路径约定）。
+7. **P4 遗留的收口（2026-10-21 补齐）**：
+   - **崩溃回合 `interrupted` 标记**：`state.json` 增 `running{<会话键>: {session,channel,chat_id,started_at}}`，`DispatchTurn` 开始 `BeginTurn`、结束 `EndTurn`（原子写）。启动时 `recoverInterrupted()` 用 `DrainRunning()` 清残留并逐条记事件 `turn_interrupted`（人类日志同名行）+ `Status.interrupted` 计数；该会话**下一次回合**在 `Ask` 前 `AppendNotice` 注入"上次回合因进程退出中断、结果未知、先核对实际进展"的提示（只注入一次）。进程被 `SIGKILL`/OOM 后重启即可看到，不再靠猜。文件：`data/state.go`、`runner/runner.go`、`runner/recover_test.go`、`data/filetail_test.go`。
+   - **记忆文件自动裁剪**：`runner.memory_max_bytes`（默认 **0 = 不裁剪**）。回合结束后按行边界保留最新内容到上限，文件头加一行 `<!-- 记忆已裁剪 <日期>：只保留最近 N 字节（原 M 字节） -->`，`0600` 原子写；裁剪量记事件 `memory_trim`。实现 `data.TrimFileTail`。
+   - **按会话的工作区白名单**：**判定不适用**——会话工作区恒为 `<data_dir>/agents/<key-slug>/`，ivan 未向模型暴露任何切换工作区的工具（`tools.Standard` 只有 `run_shell`/`read_image`/内建），"指定低风险工作区"实际靠 `data_dir` 与项目目录配置。若将来暴露工作区切换能力，再补白名单。
