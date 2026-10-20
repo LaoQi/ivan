@@ -366,6 +366,20 @@ func (r *Runner) TriggerJob(ctx context.Context, t schedule.Trigger) schedule.Ou
 		return schedule.Outcome{Err: ctx.Err()}
 	}
 	defer func() { <-r.sem }()
+	prompt := t.Prompt
+	if file := strings.TrimSpace(t.File); file != "" {
+		content, path, err := r.ReadTaskFile(file)
+		switch {
+		case err != nil:
+			r.notice("任务提示词文件不可读，改用作业内 prompt job=%s file=%s: %v", t.JobID, path, err)
+			r.note("job_task_file", t.JobID+" 任务文件不可读（回退作业内 prompt）: "+briefErr(err))
+		case content == "":
+			r.notice("任务提示词文件为空，改用作业内 prompt job=%s file=%s", t.JobID, path)
+			r.note("job_task_file", t.JobID+" 任务文件为空（回退作业内 prompt）")
+		default:
+			prompt = content
+		}
+	}
 	msg := bus.InboundMessage{
 		Channel:      bus.ChannelSchedule,
 		ReplyChannel: t.Channel,
@@ -373,10 +387,10 @@ func (r *Runner) TriggerJob(ctx context.Context, t schedule.Trigger) schedule.Ou
 		ChatType:     bus.ChatDirect,
 		SenderID:     "schedule",
 		SenderName:   t.Name,
-		Content:      t.Prompt,
+		Content:      prompt,
 		SessionKey:   t.SessionKey,
 		ReceivedAt:   time.Now(),
-		Raw:          map[string]string{"trigger": "schedule", "job_id": t.JobID},
+		Raw:          map[string]string{"trigger": "schedule", "job_id": t.JobID, "task_file": t.File},
 	}
 	turn, err := r.DispatchTurn(ctx, msg)
 	return schedule.Outcome{Tokens: turn.Tokens, NotifyErr: turn.NotifyError, Err: err}

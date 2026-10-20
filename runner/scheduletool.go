@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -15,8 +16,10 @@ import (
 
 const scheduleToolDesc = `管理计划任务（提醒、定时汇报、周期性检查）。
 - 用户说"提醒我""过一会儿""X 分钟后""每天/每小时"时必须调用本工具创建作业，不要只在回复里承诺或自己等待。
-- 时间一律用相对秒数：at_seconds=600 表示 10 分钟后；every_seconds=86400 表示每天一次（最小 60）。绝对时间才用 when。
+- 时间一律用相对秒数：at_seconds=600 表示 10 分钟后；every_seconds=3600 表示每 3600 秒一次（最小 60）。绝对时间才用 when。
+- "每天/每周固定时刻"用 daily_at（如 daily_at="20:00" 表示每天 20:00），它按自然日锚定、不会漂移，优于 every_seconds=86400；需要别的时区就同时给 timezone（默认本机时区）。
 - add 必须给 prompt：到点时会作为用户指令发给你自己的内容，写清楚要做什么、要汇报什么。
+- 每次创建作业都会把 prompt 落成任务文件（<data_dir>/tasks/<job_id>.md），触发时优先读该文件；人可以直接改文件细化作息内容，无需重建作业。
 - 作业结果自动发回当前会话，不能也不需要指定目标通道。
 - list 查看 jobs 的 id 与下次时间；remove 用 job_id 取消；run_now 立即执行一次且不改原计划。`
 
@@ -27,8 +30,11 @@ const scheduleToolParams = `{
     "job_id": {"type": "string", "description": "作业 id（update/remove/run_now 必填，从 list 获取）"},
     "name": {"type": "string", "description": "作业名，便于辨认"},
     "prompt": {"type": "string", "description": "到点时发给自己的指令（add 必填）"},
+    "task_file": {"type": "string", "description": "任务提示词文件（相对 data_dir/tasks 或绝对路径）；给了就替代 prompt，便于人改"},
     "at_seconds": {"type": "number", "description": "多少秒后触发一次，如 600 表示 10 分钟后"},
-    "every_seconds": {"type": "number", "description": "每隔多少秒触发一次，最小 60，如 86400 表示每天"},
+    "every_seconds": {"type": "number", "description": "每隔多少秒触发一次（固定间隔，最小 60），如 3600 表示每小时"},
+    "daily_at": {"type": "string", "description": "每天固定时刻触发，格式 HH:MM 或 HH:MM:SS（本地时区，配合 timezone 可换时区），如 \"20:00\" 表示每天 20:00"},
+    "timezone": {"type": "string", "description": "daily_at 使用的时区（IANA 名，如 Asia/Shanghai），默认本机时区"},
     "when": {"type": "string", "description": "一次性作业的绝对时间：RFC3339 或 \"2006-01-02 15:04\"（本地时区）"},
     "enabled": {"type": "boolean", "description": "update 时启用/停用作业"},
     "delete_after_run": {"type": "boolean", "description": "一次性作业执行后自动删除，默认 true"}
@@ -47,8 +53,11 @@ type scheduleArgs struct {
 	JobID          string  `json:"job_id"`
 	Name           string  `json:"name"`
 	Prompt         string  `json:"prompt"`
+	TaskFile       string  `json:"task_file"`
 	AtSeconds      float64 `json:"at_seconds"`
 	EverySeconds   float64 `json:"every_seconds"`
+	DailyAt        string  `json:"daily_at"`
+	Timezone       string  `json:"timezone"`
 	When           string  `json:"when"`
 	Enabled        *bool   `json:"enabled"`
 	DeleteAfterRun *bool   `json:"delete_after_run"`
@@ -72,13 +81,13 @@ func (r *Runner) scheduleToolRun(ctx context.Context, inst *instance, argsJSON s
 	}
 	switch strings.ToLower(strings.TrimSpace(a.Action)) {
 	case "add":
-		return scheduleAdd(sched, inst, a)
+		return scheduleAdd(r, sched, inst, a)
 	case "list":
 		return scheduleList(sched)
 	case "update":
-		return scheduleUpdate(sched, a)
+		return scheduleUpdate(r, sched, a)
 	case "remove":
-		return scheduleRemove(sched, a)
+		return scheduleRemove(r, sched, a)
 	case "run_now":
 		return scheduleRunNow(ctx, sched, a)
 	case "":
@@ -88,9 +97,10 @@ func (r *Runner) scheduleToolRun(ctx context.Context, inst *instance, argsJSON s
 	}
 }
 
-func scheduleAdd(sched *schedule.Scheduler, inst *instance, a scheduleArgs) string {
+func scheduleAdd(r *Runner, sched *schedule.Scheduler, inst *instance, a scheduleArgs) string {
 	prompt := strings.TrimSpace(a.Prompt)
-	if prompt == "" {
+	file := strings.TrimSpace(a.TaskFile)
+	if prompt == "" && file == "" {
 		return "error: add 需要 prompt（到点时要执行的指令）"
 	}
 	spec, err := buildSchedule(a, time.Now())
@@ -105,23 +115,39 @@ func scheduleAdd(sched *schedule.Scheduler, inst *instance, a scheduleArgs) stri
 	if a.DeleteAfterRun != nil {
 		del = *a.DeleteAfterRun
 	}
+	id := r.NewJobID()
+	payload := schedule.Payload{
+		Prompt:     prompt,
+		Channel:    tg.Channel,
+		ChatID:     tg.ChatID,
+		SessionKey: tg.SessionKey,
+	}
+	if file == "" {
+		path, err := r.WriteTaskFile(id, prompt)
+		if err != nil {
+			return "error: 写入任务文件失败: " + err.Error()
+		}
+		payload.File = path
+	} else {
+		payload.File = r.taskFilePath(file)
+		if _, _, err := r.ReadTaskFile(file); err != nil {
+			return "error: 任务文件不可读: " + err.Error()
+		}
+	}
 	job, err := sched.Add(schedule.Job{
+		ID:             id,
 		Name:           strings.TrimSpace(a.Name),
 		Enabled:        true,
 		Schedule:       spec,
 		DeleteAfterRun: del,
-		Payload: schedule.Payload{
-			Prompt:     prompt,
-			Channel:    tg.Channel,
-			ChatID:     tg.ChatID,
-			SessionKey: tg.SessionKey,
-		},
+		Payload:        payload,
 	})
 	if err != nil {
+		r.deleteTaskFile(id)
 		return "error: 创建作业失败: " + err.Error()
 	}
-	return fmt.Sprintf("已创建作业 %s（%s），下次触发 %s，结果发回 %s",
-		job.ID, describeSchedule(job.Schedule), formatMS(job.State.NextRunAtMS), job.Payload.SessionKey)
+	return fmt.Sprintf("已创建作业 %s（%s），下次触发 %s，结果发回 %s，任务文件 %s",
+		job.ID, describeSchedule(job.Schedule), formatMS(job.State.NextRunAtMS), job.Payload.SessionKey, job.Payload.File)
 }
 
 func scheduleList(sched *schedule.Scheduler) string {
@@ -144,6 +170,9 @@ func scheduleList(sched *schedule.Scheduler) string {
 	for _, j := range jobs {
 		line := fmt.Sprintf("- %s | %s | %s | 下次 %s | 上次 %s | 跑了 %d 次",
 			j.ID, j.Label(), describeSchedule(j.Schedule), formatMS(j.State.NextRunAtMS), statusText(j.State), j.State.Runs)
+		if j.Payload.File != "" {
+			line += " | 任务文件 " + j.Payload.File
+		}
 		if !j.Enabled {
 			line += " | 已停用"
 		}
@@ -156,17 +185,32 @@ func scheduleList(sched *schedule.Scheduler) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func scheduleUpdate(sched *schedule.Scheduler, a scheduleArgs) string {
+func scheduleUpdate(r *Runner, sched *schedule.Scheduler, a scheduleArgs) string {
 	id := strings.TrimSpace(a.JobID)
 	if id == "" {
 		return "error: update 需要 job_id"
 	}
+	var written string
 	job, err := sched.Update(id, func(j *schedule.Job) error {
 		if name := strings.TrimSpace(a.Name); name != "" {
 			j.Name = name
 		}
 		if prompt := strings.TrimSpace(a.Prompt); prompt != "" {
 			j.Payload.Prompt = prompt
+			if j.Payload.File != "" {
+				path, err := r.WriteTaskFile(j.ID, prompt)
+				if err != nil {
+					return err
+				}
+				written = path
+				j.Payload.File = path
+			}
+		}
+		if file := strings.TrimSpace(a.TaskFile); file != "" {
+			if _, _, err := r.ReadTaskFile(file); err != nil {
+				return err
+			}
+			j.Payload.File = r.taskFilePath(file)
 		}
 		if a.Enabled != nil {
 			j.Enabled = *a.Enabled
@@ -174,7 +218,7 @@ func scheduleUpdate(sched *schedule.Scheduler, a scheduleArgs) string {
 		if a.DeleteAfterRun != nil {
 			j.DeleteAfterRun = *a.DeleteAfterRun
 		}
-		if a.AtSeconds > 0 || a.EverySeconds > 0 || strings.TrimSpace(a.When) != "" {
+		if a.AtSeconds > 0 || a.EverySeconds > 0 || strings.TrimSpace(a.When) != "" || strings.TrimSpace(a.DailyAt) != "" {
 			spec, err := buildSchedule(a, time.Now())
 			if err != nil {
 				return err
@@ -189,16 +233,30 @@ func scheduleUpdate(sched *schedule.Scheduler, a scheduleArgs) string {
 	if err != nil {
 		return "error: 更新作业失败: " + err.Error()
 	}
-	return fmt.Sprintf("已更新作业 %s（%s），下次触发 %s", job.ID, describeSchedule(job.Schedule), formatMS(job.State.NextRunAtMS))
+	text := fmt.Sprintf("已更新作业 %s（%s），下次触发 %s", job.ID, describeSchedule(job.Schedule), formatMS(job.State.NextRunAtMS))
+	if written != "" {
+		text += "，任务文件 " + written
+	}
+	return text
 }
 
-func scheduleRemove(sched *schedule.Scheduler, a scheduleArgs) string {
+func scheduleRemove(r *Runner, sched *schedule.Scheduler, a scheduleArgs) string {
 	id := strings.TrimSpace(a.JobID)
 	if id == "" {
 		return "error: remove 需要 job_id"
 	}
+	job, ok, err := sched.Get(id)
+	if err != nil {
+		return "error: 读取作业失败: " + err.Error()
+	}
+	if !ok {
+		return "error: 作业不存在: " + id
+	}
 	if err := sched.Remove(id); err != nil {
 		return "error: 取消作业失败: " + err.Error()
+	}
+	if file := strings.TrimSpace(job.Payload.File); file != "" && strings.HasPrefix(file, r.cfg.TasksDir()+string(filepath.Separator)) {
+		r.deleteTaskFile(id)
 	}
 	return "已取消作业 " + id
 }
@@ -220,11 +278,25 @@ func buildSchedule(a scheduleArgs, now time.Time) (schedule.Schedule, error) {
 	hasAt := a.AtSeconds > 0
 	hasWhen := when != ""
 	hasEvery := a.EverySeconds > 0
-	switch {
-	case hasAt && hasWhen:
-		return schedule.Schedule{}, fmt.Errorf("at_seconds 与 when 只能给一个")
-	case hasAt && hasEvery, hasWhen && hasEvery:
-		return schedule.Schedule{}, fmt.Errorf("一次性时间与 every_seconds 只能给一个")
+	hasDaily := strings.TrimSpace(a.DailyAt) != ""
+	given := 0
+	for _, ok := range []bool{hasAt, hasWhen, hasEvery, hasDaily} {
+		if ok {
+			given++
+		}
+	}
+	if given > 1 {
+		return schedule.Schedule{}, fmt.Errorf("at_seconds / when / every_seconds / daily_at 只能给一个")
+	}
+	if hasDaily {
+		atTimeMS, err := parseDailyAt(a.DailyAt)
+		if err != nil {
+			return schedule.Schedule{}, err
+		}
+		if _, err := schedule.Location(a.Timezone); err != nil {
+			return schedule.Schedule{}, err
+		}
+		return schedule.Schedule{Kind: schedule.KindDaily, AtTimeMS: atTimeMS, TZ: strings.TrimSpace(a.Timezone)}, nil
 	}
 	if hasEvery {
 		if int64(a.EverySeconds) < minEverySeconds {
@@ -246,8 +318,18 @@ func buildSchedule(a scheduleArgs, now time.Time) (schedule.Schedule, error) {
 		}
 		return schedule.Schedule{Kind: schedule.KindAt, AtMS: schedule.MS(at)}, nil
 	default:
-		return schedule.Schedule{}, fmt.Errorf("需要 at_seconds（多少秒后）或 every_seconds（每多少秒）或 when（绝对时间）")
+		return schedule.Schedule{}, fmt.Errorf("需要 at_seconds（多少秒后）、every_seconds（每多少秒）、daily_at（每天几点）或 when（绝对时间）")
 	}
+}
+
+func parseDailyAt(s string) (int64, error) {
+	v := strings.TrimSpace(s)
+	for _, layout := range []string{"15:04", "15:04:05"} {
+		if t, err := time.ParseInLocation(layout, v, time.Local); err == nil {
+			return int64(t.Hour())*3600000 + int64(t.Minute())*60000 + int64(t.Second())*1000, nil
+		}
+	}
+	return 0, fmt.Errorf("无法解析 daily_at=%q（用 HH:MM 或 HH:MM:SS）", s)
 }
 
 func parseWhen(s string, now time.Time) (time.Time, error) {
@@ -269,8 +351,25 @@ func describeSchedule(s schedule.Schedule) string {
 		return "一次性 " + formatMS(s.AtMS)
 	case schedule.KindEvery:
 		return "每 " + humanEvery(s.EveryMS)
+	case schedule.KindDaily:
+		return "每天 " + clockOf(s.AtTimeMS) + tzSuffix(s.TZ)
 	}
 	return string(s.Kind)
+}
+
+func clockOf(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	if ms%60000 == 0 {
+		return fmt.Sprintf("%02d:%02d", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%02d:%02d:%02d", int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60)
+}
+
+func tzSuffix(tz string) string {
+	if strings.TrimSpace(tz) == "" {
+		return ""
+	}
+	return "（" + tz + "）"
 }
 
 func humanEvery(ms int64) string {

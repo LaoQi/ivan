@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,12 +30,13 @@ func sampleJob(id string) schedule.Job {
 		Name:    "每日汇报",
 		Enabled: true,
 		Schedule: schedule.Schedule{
-			Kind:    schedule.KindEvery,
-			EveryMS: int64(24 * time.Hour / time.Millisecond),
-			TZ:      "Asia/Shanghai",
+			Kind:     schedule.KindDaily,
+			AtTimeMS: int64(20 * time.Hour / time.Millisecond),
+			TZ:       "Asia/Shanghai",
 		},
 		Payload: schedule.Payload{
 			Prompt:     "汇总昨天的 git 提交",
+			File:       "/data/tasks/job_1.md",
 			Channel:    "qq",
 			ChatID:     "u1",
 			SessionKey: "qq:c2c:u1",
@@ -186,5 +188,72 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	if len(list) != 8 {
 		t.Fatalf("作业数 %d，期望 8", len(list))
+	}
+}
+
+func TestMigrateV1ToCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("打开旧库: %v", err)
+	}
+	if _, err := db.Exec(`create table jobs (
+		id text primary key,
+		name text not null default '',
+		enabled integer not null default 1,
+		kind text not null,
+		at_ms integer not null default 0,
+		every_ms integer not null default 0,
+		expr text not null default '',
+		tz text not null default '',
+		prompt text not null default '',
+		channel text not null default '',
+		chat_id text not null default '',
+		session_key text not null default '',
+		next_run_at_ms integer not null default 0,
+		last_run_at_ms integer not null default 0,
+		last_status text not null default '',
+		last_error text not null default '',
+		last_notify_error text not null default '',
+		last_tokens integer not null default 0,
+		runs integer not null default 0,
+		delete_after_run integer not null default 0,
+		created_at_ms integer not null default 0,
+		updated_at_ms integer not null default 0
+	)`); err != nil {
+		t.Fatalf("建旧表: %v", err)
+	}
+	if _, err := db.Exec(`insert into jobs (id, name, kind, every_ms, prompt, channel, chat_id, session_key, next_run_at_ms)
+		values ('job_old', '旧作业', 'every', 60000, '旧提示词', 'qq', 'u1', 'qq:c2c:u1', 0)`); err != nil {
+		t.Fatalf("写旧数据: %v", err)
+	}
+	if _, err := db.Exec("pragma user_version = 1"); err != nil {
+		t.Fatalf("写版本: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关闭旧库: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("迁移打开失败: %v", err)
+	}
+	defer s.Close()
+	got, ok, err := s.Get("job_old")
+	if err != nil || !ok {
+		t.Fatalf("迁移后读取失败: ok=%v err=%v", ok, err)
+	}
+	if got.Schedule.Kind != schedule.KindEvery || got.Schedule.EveryMS != 60000 || got.Payload.Prompt != "旧提示词" {
+		t.Fatalf("旧字段丢失: %+v", got)
+	}
+	if got.Schedule.AtTimeMS != 0 || got.Payload.File != "" {
+		t.Fatalf("新列应为零值: %+v", got.Schedule)
+	}
+	if err := s.Put(sampleJob("job_new")); err != nil {
+		t.Fatalf("迁移后写入失败: %v", err)
+	}
+	if again, _, _ := s.Get("job_new"); again.Schedule.AtTimeMS == 0 || again.Payload.File == "" {
+		t.Fatalf("新列未持久化: %+v", again)
 	}
 }

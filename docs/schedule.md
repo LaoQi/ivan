@@ -1,6 +1,6 @@
 # 定时与计划任务
 
-> 状态：**P3 已实现**（`schedule/` 模型+调度循环、`schedule/sqlite` 存储实现、`schedule` 工具、daemon 接线、`ivan jobs`/`pause`/`resume`；实现记录见 §8）。这是 ivan 相对 tanya 的核心特化能力：模型能自己安排将来的事，且安排得住（持久化、重启恢复、结果回灌）。
+> 状态：**P3 已实现，P5 前补 `daily` 与任务文件（2026-10-21）**（`schedule/` 模型+调度循环、`schedule/sqlite` 存储实现、`schedule` 工具、daemon 接线、`ivan jobs`/`pause`/`resume`；实现记录见 §8）。这是 ivan 相对 tanya 的核心特化能力：模型能自己安排将来的事，且安排得住（持久化、重启恢复、结果回灌）。
 
 ## 1 作业模型
 
@@ -9,8 +9,8 @@
   "id": "job_20261020_233000_ab12",
   "name": "每日汇报",
   "enabled": true,
-  "schedule": { "kind": "every", "every_ms": 86400000, "at_ms": 0, "expr": "", "tz": "" },
-  "payload": { "prompt": "汇总昨天的 git 提交并发我", "channel": "qq", "chat_id": "…", "session_key": "qq:c2c:…" },
+  "schedule": { "kind": "daily", "every_ms": 0, "at_ms": 0, "at_time_ms": 72000000, "expr": "", "tz": "Asia/Shanghai" },
+  "payload": { "prompt": "汇总昨天的 git 提交并发我", "file": "<data_dir>/tasks/<job_id>.md", "channel": "qq", "chat_id": "…", "session_key": "qq:c2c:…" },
   "state": {
     "next_run_at_ms": 0, "last_run_at_ms": 0,
     "last_status": "ok|failed|missed|running|interrupted|budget",
@@ -22,7 +22,12 @@
 }
 ```
 
-- `kind`：`at`（一次性，`at_ms`）/ `every`（周期，`every_ms`，下限 1000ms）；`expr`（cron 表达式）**本期只留字段不实现**（D5，`Validate` 见到 `expr` 直接报错）。
+- `kind`：
+  - `at`（一次性，`at_ms`）；
+  - `every`（固定间隔，`every_ms`，下限 1000ms；从**创建时间**起算，跨重启不漂移但不锚自然时刻）；
+  - `daily`（**每天固定时刻**，`at_time_ms` = 当日零点起的毫秒偏移，`tz` = IANA 时区名，空=本机时区）：按自然日锚定，**每次触发后重算次日同一时刻**，长时间运行不漂移，也天然跨 DST/跨月。
+- `expr`（完整 cron 表达式）**不做**：只留字段、`Validate` 见到即报错（D5 修订）。`daily` 覆盖了实际需要（每日定时汇报/提醒）；需要"每周一""每月 1 号"时再按需扩展 `daily` 的周期维度，不引入通用 cron 解析器。
+- `payload.file`：任务提示词文件（见 §4.1）。`prompt` 仍保留为**回退内容**，两者至少有一个。
 - `payload.channel` + `chat_id` + `session_key`：结果回灌的目标。**由 runner 注入、模型不可指定**：默认继承创建作业的那个会话（"提醒我/每天汇报"的正确语义）。
 - `state`：`last_status` 只反映**作业执行**结果；`last_notify_error` 单独记投递失败（通道不可达、频控），通知失败不影响执行判定。
 - `delete_after_run`：一次性作业执行后自删（默认 true，`every` 默认 false）。
@@ -33,7 +38,8 @@
 - 到期处理：`launch` 置 `running` 落盘 → 起 goroutine 派发（`Dispatcher.TriggerJob`，超时 `job_timeout_seconds` 默认 900）→ 回执后写 `runs`/`last_*`/`next_run_at_ms`。
 - 派发是**同步调用 runner**（不经 Bus）：只有这样作业状态才能拿到真实回合结果与 token 用量（决策见 §8.1）。
 - 不重入：同一作业在飞时不再派发（不排队堆积）；`every` 的下次时间**基于计划时间**推进（`planned+every`，不漂移），落后超过一个周期记 `missed` 并跳到未来。
-- 错过策略：进程停止期间到期的 `at` 作业，启动时按 `missed_policy: run|skip`（默认 `run`，一次性提醒不该被吞）；`every` 只重算 next、不补跑（记 `missed` 事件）。
+- 错过策略：进程停止期间到期的 `at` 作业，启动时按 `missed_policy: run|skip`（默认 `run`，一次性提醒不该被吞）；`every`/`daily` 只重算 next、不补跑（记 `missed` 事件，`daily` 按"错过 N 天"计数）。
+- 暂停（`ivan pause`）时 `daily` 与 `every` 同样跳过并推进到下一个自然时刻，不堆积。
 - 崩溃语义：`running` 状态在下次启动时归一为 `interrupted`（不假装跑过）。
 - 时间：内部一律毫秒时间戳（UTC 语义），展示按本地时区；`tz` 只在将来支持 `expr` 时用于解释表达式。
 
@@ -53,7 +59,7 @@ type Store interface {
 ```
 
 - 首个生产实现：`schedule/sqlite`（`modernc.org/sqlite`，**纯 Go 无 cgo**），文件默认 `<data_dir>/jobs.db`。
-- 打开时 `PRAGMA user_version` 做 schema 迁移；库版本高于程序 → 显式报错退出（不降级写）；`jobs` 表按列存（不是 JSON blob），带 `(enabled, next_run_at_ms)` 索引。
+- 打开时 `PRAGMA user_version` 做 schema 迁移（当前 **v3**：v2 增 `at_time_ms`、v3 增 `task_file`，均为 `alter table add column`，老库原地升级、不动数据）；库版本高于程序 → 显式报错退出（不降级写）；`jobs` 表按列存（不是 JSON blob），带 `(enabled, next_run_at_ms)` 索引。
 - 可靠性：WAL + `synchronous(FULL)` + `busy_timeout(5000)`，单连接串行化写；写入由 sqlite 保证原子提交，进程崩溃不回滚已提交作业、不产生半条记录。
 - 损坏/解析失败：**保留原文件、显式报错、不静默重建**。daemon 打不开作业库时降级为"无调度器"（daemon 仍跑通道），错误进事件日志与 `ivan status` 的 `schedule_error`；文件留在原处等人工处理。
 - 为什么不用 jobs.json：整文件重写好于追加写，但仍然要自己实现原子性、并发访问与索引；作业状态是"频繁小写 + 需要一致性"的数据，交给事务型存储更稳（决策见 `docs/plan.md` D8）。
@@ -83,6 +89,15 @@ type Store interface {
 - `list` 返回紧凑列表（id/名称/类型/下次/上次/次数/错误）；`remove` 用 `job_id`；`run_now` 立即执行一次且**不改原计划**（`at` 也不会被消耗）。
 - **只有模型能从对话里建作业**（`ivan jobs` 只做 list/rm/run），人工建作业请改库或经模型发起。
 
+### 4.1 任务提示词文件（持久化）
+
+作业的提示词不再只存在库里，**每次 `add` 都会落成文件** `<data_dir>/tasks/<job_id>.md`（`0600`、原子写），作业的 `payload.file` 指向它：
+
+- 触发时**优先读文件内容**作为本轮指令；文件不可读或为空则回退 `payload.prompt` 并记 `job_task_file` 事件（不静默、不改作业状态）。
+- 目的：日报/周报这类"任务说明"会随需求演进，人可以直接编辑文件细化内容（加脚本路径、输出格式、归档约定），**不必让模型重建作业**；文件也可入库、可查、可 diff。
+- `update` 带 `prompt` 时会同步重写该文件；`remove` 时删除文件（仅限 `<data_dir>/tasks/` 下的自有文件，外链的绝对路径不动）。
+- 工具也接受 `task_file`（相对 `tasks/` 或绝对路径）直接引用现成文件，此时不生成新文件；文件必须可读，否则 `add` 直接报错。
+
 ## 5 与通道的关系
 
 调度器不认识 QQ，也不碰 `Channel` 接口：
@@ -107,6 +122,7 @@ type Store interface {
 2. 重启 daemon → 作业仍在、`next_run_at_ms` 正确重算；停止期间的 `at` 作业按策略补跑。
 3. 模型在 QQ 里说"10 分钟后提醒我喝水" → 自动建作业 → 到点收到 QQ 消息。
 4. 长作业超过周期 → 跳过而非堆积，日志可见。
+5. `daily` 作业（如 `daily_at: "20:00"`）按自然日锚定触发，重启/暂停后不漂移；任务文件被人工修改后，下次触发按文件内容执行。
 
 状态：1/2/4 已由单测与 daemon 端到端覆盖（§8.5）；**3 已真机通过**（2026-10-20，生产凭证）：单聊说"1 分钟后提醒我喝水" → 模型建 `at` 作业（目标继承 `qq:c2c:<openid>`）→ 到点触发 → 结果以主动消息回投原单聊（`qq sent=2 send_errors=0`），`at` 作业默认执行后自删。
 

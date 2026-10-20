@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -313,6 +315,31 @@ func (c *Config) JobsDBPath() string {
 }
 
 func (c *Config) MemoryDir() string { return filepath.Join(c.DataDir, "memory") }
+
+func (c *Config) TasksDir() string { return filepath.Join(c.DataDir, "tasks") }
+
+func (c *Config) TaskPath(id string) string { return filepath.Join(c.TasksDir(), taskSlug(id)+".md") }
+
+func taskSlug(id string) string {
+	out := make([]rune, 0, len(id))
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '-')
+		}
+	}
+	s := strings.Trim(string(out), "-")
+	if s == "" {
+		return "task"
+	}
+	if len(s) > 64 {
+		sum := sha256.Sum256([]byte(id))
+		s = s[:64] + "-" + hex.EncodeToString(sum[:6])
+	}
+	return s
+}
 
 func (c *Config) GlobalAgentsPath() string {
 	switch strings.ToLower(strings.TrimSpace(c.GlobalAgents)) {

@@ -25,6 +25,8 @@
 - 预算只在一处统计：`runner`（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日用量落 `state.json` 跨进程累计），调度器用注入的 `Budget` 回调复用；不要再加第二个预算口径
 - 暂停语义：`paused` 只挡**无人值守路径**（定时作业触发、交接后自动续跑、阈值交接提示），用户主动消息照常处理
 - 记忆与目标**按需读取**：路径写进 system prompt（静态、保缓存），模型自己 `run_shell` 读/追加，不做每轮注入、不建专用工具
+- 调度类型：`at` / `every`（固定间隔）/ `daily`（每天固定时刻 `at_time_ms` + `tz`，按自然日锚定、不漂移）；**不做通用 cron 表达式**（`expr` 字段保留但 `Validate` 报错）
+- 任务提示词落文件：`add` 时写 `<data_dir>/tasks/<job_id>.md`（0600 原子写）并由 `payload.file` 引用，触发**优先读文件**、不可读则回退 `payload.prompt` 并记 `job_task_file`；`update` 同步重写、`remove` 删自有文件
 - 定时作业：触发由 runner **同步**执行（`Runner.TriggerJob`），作业状态以真实回合结果为准；出站按 `InboundMessage.ReplyChannel` **直投**（不走 Bus）以便拿到投递错误；作业目标会话只由 runner 注入，模型不可指定；配额默认不限
 - 持久化一律原子写（临时文件 + fsync + rename）；解析失败保留原文件并显式报错，**不静默重建**
 - 启动拒绝 root（复用 `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致

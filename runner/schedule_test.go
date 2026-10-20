@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -205,5 +206,112 @@ func TestParseWhenAndScheduleSummary(t *testing.T) {
 	b, _ := json.Marshal(schedule.Job{ID: "x"})
 	if !strings.Contains(string(b), `"id":"x"`) {
 		t.Fatalf("作业序列化异常: %s", b)
+	}
+}
+
+func TestScheduleToolDailyWritesTaskFile(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Content: "好的"})
+	defer srv.Close()
+	rg := newRig(t, srv)
+	sched := withScheduler(t, rg)
+	if got := rg.dispatch(t, inbound("cli:default", "req-1", "每天 20 点汇报")); !strings.Contains(got, "好的") {
+		t.Fatalf("出站内容异常: %q", got)
+	}
+	inst := rg.r.pool["cli:default"]
+	tool := rg.r.scheduleTool(inst)
+	ctx := context.Background()
+
+	out := tool.Invoke(ctx, `{"action":"add","name":"日报","daily_at":"20:00","prompt":"跑日报脚本并汇报"}`).Text
+	if !strings.Contains(out, "已创建作业") || !strings.Contains(out, "任务文件") {
+		t.Fatalf("创建失败: %q", out)
+	}
+	jobs, _ := sched.List()
+	if len(jobs) != 1 {
+		t.Fatalf("作业数异常: %d", len(jobs))
+	}
+	j := jobs[0]
+	if j.Schedule.Kind != schedule.KindDaily || j.Schedule.AtTimeMS != 20*3600*1000 {
+		t.Fatalf("调度类型异常: %+v", j.Schedule)
+	}
+	if j.DeleteAfterRun {
+		t.Fatal("周期作业不应执行后自删")
+	}
+	if want := rg.cfg.TaskPath(j.ID); j.Payload.File != want {
+		t.Fatalf("任务文件路径 %q，期望 %q", j.Payload.File, want)
+	}
+	raw, err := os.ReadFile(j.Payload.File)
+	if err != nil {
+		t.Fatalf("任务文件未落盘: %v", err)
+	}
+	if string(raw) != "跑日报脚本并汇报" {
+		t.Fatalf("任务文件内容异常: %q", raw)
+	}
+	if st, _ := os.Stat(j.Payload.File); st.Mode().Perm() != 0o600 {
+		t.Fatalf("任务文件权限应为 0600: %v", st.Mode().Perm())
+	}
+
+	// 人改文件 → 触发时以文件内容为准
+	if err := os.WriteFile(j.Payload.File, []byte("人改过的日报指令"), 0o600); err != nil {
+		t.Fatalf("改文件: %v", err)
+	}
+	if _, err := sched.RunNow(ctx, j.ID); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	last := lastMessage(t, srv)
+	if !strings.Contains(last, "人改过的日报指令") {
+		t.Fatalf("触发时未使用任务文件内容: %s", last)
+	}
+
+	// 任务文件丢了 → 回退作业内 prompt
+	if err := os.Remove(j.Payload.File); err != nil {
+		t.Fatalf("删文件: %v", err)
+	}
+	if _, err := sched.RunNow(ctx, j.ID); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	last = lastMessage(t, srv)
+	if !strings.Contains(last, "跑日报脚本并汇报") {
+		t.Fatalf("文件缺失时应回退作业内 prompt: %s", last)
+	}
+
+	// remove 清理任务文件
+	if err := os.WriteFile(j.Payload.File, []byte("x"), 0o600); err != nil {
+		t.Fatalf("重建文件: %v", err)
+	}
+	if out := tool.Invoke(ctx, `{"action":"remove","job_id":"`+j.ID+`"}`).Text; !strings.Contains(out, "已取消作业") {
+		t.Fatalf("取消失败: %q", out)
+	}
+	if _, err := os.Stat(j.Payload.File); !os.IsNotExist(err) {
+		t.Fatalf("取消作业后应清理任务文件: %v", err)
+	}
+}
+
+func TestScheduleToolDailyArgsValidation(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Content: "好的"})
+	defer srv.Close()
+	rg := newRig(t, srv)
+	sched := withScheduler(t, rg)
+	if got := rg.dispatch(t, inbound("cli:default", "req-1", "hi")); !strings.Contains(got, "好的") {
+		t.Fatalf("出站异常: %q", got)
+	}
+	tool := rg.r.scheduleTool(rg.r.pool["cli:default"])
+	ctx := context.Background()
+	cases := []struct {
+		args string
+		want string
+	}{
+		{`{"action":"add","prompt":"x","daily_at":"25:00"}`, "无法解析 daily_at"},
+		{`{"action":"add","prompt":"x","daily_at":"20:00","timezone":"Nowhere/Unknown"}`, "无法解析时区"},
+		{`{"action":"add","prompt":"x","daily_at":"20:00","every_seconds":60}`, "只能给一个"},
+		{`{"action":"add","daily_at":"20:00"}`, "需要 prompt"},
+		{`{"action":"add","prompt":"x","daily_at":"20:00","task_file":"/tmp/不存在.md"}`, "任务文件不可读"},
+	}
+	for _, c := range cases {
+		if got := tool.Invoke(ctx, c.args).Text; !strings.Contains(got, c.want) {
+			t.Fatalf("args=%s 期望含 %q，实际 %q", c.args, c.want, got)
+		}
+	}
+	if jobs, err := sched.List(); err != nil || len(jobs) != 0 {
+		t.Fatalf("非法参数不应建作业: %+v %v", jobs, err)
 	}
 }

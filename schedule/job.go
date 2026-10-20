@@ -13,7 +13,10 @@ type Kind string
 const (
 	KindAt    Kind = "at"
 	KindEvery Kind = "every"
+	KindDaily Kind = "daily"
 )
+
+const DayMS = int64(86400000)
 
 const (
 	StatusOK          = "ok"
@@ -27,15 +30,17 @@ const (
 const MinEveryMS = int64(1000)
 
 type Schedule struct {
-	Kind    Kind   `json:"kind"`
-	AtMS    int64  `json:"at_ms,omitempty"`
-	EveryMS int64  `json:"every_ms,omitempty"`
-	Expr    string `json:"expr,omitempty"`
-	TZ      string `json:"tz,omitempty"`
+	Kind     Kind   `json:"kind"`
+	AtMS     int64  `json:"at_ms,omitempty"`
+	EveryMS  int64  `json:"every_ms,omitempty"`
+	AtTimeMS int64  `json:"at_time_ms,omitempty"`
+	Expr     string `json:"expr,omitempty"`
+	TZ       string `json:"tz,omitempty"`
 }
 
 type Payload struct {
 	Prompt     string `json:"prompt"`
+	File       string `json:"file,omitempty"`
 	Channel    string `json:"channel"`
 	ChatID     string `json:"chat_id"`
 	SessionKey string `json:"session_key"`
@@ -93,16 +98,74 @@ func (j Job) Validate() error {
 		if j.Schedule.AtMS != 0 {
 			return fmt.Errorf("周期作业不能同时带一次性时间")
 		}
+	case KindDaily:
+		if j.Schedule.Expr != "" {
+			return fmt.Errorf("daily 作业不能再带 cron 表达式")
+		}
+		if j.Schedule.AtTimeMS < 0 || j.Schedule.AtTimeMS >= DayMS {
+			return fmt.Errorf("daily 作业的每日时刻超出范围（毫秒偏移需在 0 ~ %d 之间）", DayMS-1)
+		}
+		if _, err := Location(j.Schedule.TZ); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知的调度类型 %q（只支持 at/every）", j.Schedule.Kind)
+		return fmt.Errorf("未知的调度类型 %q（只支持 at/every/daily）", j.Schedule.Kind)
 	}
-	if strings.TrimSpace(j.Payload.Prompt) == "" {
+	if strings.TrimSpace(j.Payload.Prompt) == "" && strings.TrimSpace(j.Payload.File) == "" {
 		return fmt.Errorf("作业缺少 prompt")
 	}
 	if strings.TrimSpace(j.Payload.Channel) == "" {
 		return fmt.Errorf("作业缺少回投通道")
 	}
 	return nil
+}
+
+func Location(tz string) (*time.Location, error) {
+	name := strings.TrimSpace(tz)
+	if name == "" || name == "local" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("无法解析时区 %q: %w", tz, err)
+	}
+	return loc, nil
+}
+
+func dailyAt(t time.Time, atTimeMS int64) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).
+		Add(time.Duration(atTimeMS) * time.Millisecond)
+}
+
+func NextDaily(fromMS, atTimeMS int64, tz string, nowMS int64) (int64, int) {
+	loc, err := Location(tz)
+	if err != nil {
+		loc = time.Local
+	}
+	cur := dailyAt(FromMS(fromMS).In(loc), atTimeMS)
+	if MS(cur) <= fromMS {
+		cur = cur.AddDate(0, 0, 1)
+	}
+	missed := 0
+	for MS(cur) <= nowMS {
+		cur = cur.AddDate(0, 0, 1)
+		missed++
+	}
+	return MS(cur), missed
+}
+
+func SkipDaily(fromMS, atTimeMS int64, tz string, nowMS int64) (int64, int) {
+	loc, err := Location(tz)
+	if err != nil {
+		loc = time.Local
+	}
+	cur := dailyAt(FromMS(fromMS).In(loc), atTimeMS)
+	missed := 0
+	for MS(cur) <= nowMS {
+		cur = cur.AddDate(0, 0, 1)
+		missed++
+	}
+	return MS(cur), missed
 }
 
 func (j Job) Done() bool {
@@ -129,6 +192,9 @@ func (j *Job) InitNext(now time.Time) {
 			base = MS(now)
 		}
 		j.State.NextRunAtMS = base + j.Schedule.EveryMS
+	case KindDaily:
+		next, _ := NextDaily(MS(now), j.Schedule.AtTimeMS, j.Schedule.TZ, MS(now))
+		j.State.NextRunAtMS = next
 	}
 }
 

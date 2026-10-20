@@ -517,3 +517,142 @@ func TestInterruptedNormalizedOnStart(t *testing.T) {
 	}
 	t.Fatalf("running 未归一为 interrupted: %+v", h.job("j4").State)
 }
+
+func dailyJob(id string, atTimeMS int64, tz string) Job {
+	return Job{
+		ID:      id,
+		Name:    "每日报告",
+		Enabled: true,
+		Schedule: Schedule{
+			Kind:     KindDaily,
+			AtTimeMS: atTimeMS,
+			TZ:       tz,
+		},
+		Payload: Payload{Prompt: "汇报一下", Channel: "qq", ChatID: "u1", SessionKey: "qq:c2c:u1"},
+	}
+}
+
+func TestDailyAnchorsAndAdvancesWithoutDrift(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.MissedPolicy = MissedRun })
+	h.disp.out = Outcome{Tokens: 7}
+	h.clock.t = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	job, err := h.sched.Add(dailyJob("", 20*3600*1000, "UTC"))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.start()
+	if want := time.Date(2026, 10, 20, 20, 0, 0, 0, time.UTC).UnixMilli(); job.State.NextRunAtMS != want {
+		t.Fatalf("首次计划时间 %s，期望 20:00", FromMS(job.State.NextRunAtMS).Format(time.RFC3339))
+	}
+	h.clock.Advance(9 * time.Hour)
+	h.sched.Wake()
+	j := h.waitRuns(job.ID, 1)
+	if want := time.Date(2026, 10, 21, 20, 0, 0, 0, time.UTC).UnixMilli(); j.State.NextRunAtMS != want {
+		t.Fatalf("下一次 %s，期望次日 20:00", FromMS(j.State.NextRunAtMS).Format(time.RFC3339))
+	}
+	if calls := h.disp.Calls(); len(calls) != 1 || calls[0].JobID != job.ID {
+		t.Fatalf("执行调用异常: %+v", calls)
+	}
+}
+
+func TestDailyPassedTimeGoesToNextDay(t *testing.T) {
+	h := newHarness(t, nil)
+	h.clock.t = time.Date(2026, 10, 20, 21, 30, 0, 0, time.UTC)
+	job, err := h.sched.Add(dailyJob("", 20*3600*1000, "UTC"))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if want := time.Date(2026, 10, 21, 20, 0, 0, 0, time.UTC).UnixMilli(); job.State.NextRunAtMS != want {
+		t.Fatalf("当天时刻已过应排到次日，实际 %s", FromMS(job.State.NextRunAtMS).Format(time.RFC3339))
+	}
+}
+
+func TestDailyMissedAtStartupSkipsToFuture(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.MissedPolicy = MissedRun })
+	h.clock.t = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	job := dailyJob("daily-missed", 20*3600*1000, "UTC")
+	job.State.NextRunAtMS = time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC).UnixMilli()
+	if err := h.store.Put(job); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	h.start()
+	j := h.waitRuns(job.ID, 0)
+	if j.State.NextRunAtMS <= h.clock.Now().UnixMilli() {
+		t.Fatalf("停机错过的每日作业应排到未来，实际 %s", FromMS(j.State.NextRunAtMS).Format(time.RFC3339))
+	}
+	if j.State.LastStatus != StatusMissed {
+		t.Fatalf("状态 %q，期望 missed", j.State.LastStatus)
+	}
+	if j.State.NextRunAtMS != time.Date(2026, 10, 20, 20, 0, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("应排到当天 20:00，实际 %s", FromMS(j.State.NextRunAtMS).Format(time.RFC3339))
+	}
+}
+
+func TestDailyPausedSkipsWithoutPilingUp(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.MissedPolicy = MissedRun })
+	h.clock.t = time.Date(2026, 10, 20, 19, 59, 0, 0, time.UTC)
+	job, err := h.sched.Add(dailyJob("", 20*3600*1000, "UTC"))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.setPaused(true)
+	h.start()
+	h.clock.Advance(2 * time.Minute)
+	h.sched.Wake()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if j, ok, _ := h.store.Get(job.ID); ok && j.State.NextRunAtMS > h.clock.Now().UnixMilli() {
+			if len(h.disp.Calls()) != 0 {
+				t.Fatalf("暂停期间不应执行: %+v", h.disp.Calls())
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("暂停的每日作业未推进到下次")
+}
+
+func TestDailyValidation(t *testing.T) {
+	base := dailyJob("x", 20*3600*1000, "UTC")
+	if err := base.Validate(); err != nil {
+		t.Fatalf("合法 daily 作业被拒: %v", err)
+	}
+	bad := base
+	bad.Schedule.AtTimeMS = DayMS
+	if err := bad.Validate(); err == nil {
+		t.Fatal("越界时刻应报错")
+	}
+	bad = base
+	bad.Schedule.TZ = "Nowhere/Unknown"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("未知时区应报错")
+	}
+	bad = base
+	bad.Schedule.Expr = "0 20 * * *"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("daily 不应接受 cron 表达式")
+	}
+	noPrompt := dailyJob("x", 0, "")
+	noPrompt.Payload.Prompt = ""
+	if err := noPrompt.Validate(); err == nil {
+		t.Fatal("缺少 prompt 与任务文件应报错")
+	}
+	withFile := noPrompt
+	withFile.Payload.File = "tasks/x.md"
+	if err := withFile.Validate(); err != nil {
+		t.Fatalf("有任务文件应通过: %v", err)
+	}
+}
+
+func TestDailyTimezoneRespected(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Skipf("缺少时区数据: %v", err)
+	}
+	from := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC).UnixMilli()
+	next, missed := NextDaily(from, 20*3600*1000, "Asia/Shanghai", from)
+	want := time.Date(2026, 10, 20, 20, 0, 0, 0, loc).UnixMilli()
+	if next != want || missed != 0 {
+		t.Fatalf("next=%s missed=%d，期望 %s", FromMS(next).Format(time.RFC3339), missed, FromMS(want).Format(time.RFC3339))
+	}
+}

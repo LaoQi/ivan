@@ -57,7 +57,7 @@ main.go            CLI：run(前台单发) / send / daemon / status / jobs / log
 config/            内嵌 agent.Config + channels + schedule + daemon + policy 段（yaml + IVAN_*）
 bus/               InboundMessage / OutboundMessage / Bus（带缓冲、非阻塞、可观测丢弃计数）
 channel/           Channel 接口 + Manager + 注册表；子包 cli/ log/ qq/
-schedule/          Job 模型 / 存储抽象 + 进程内实现 / 调度循环（at|every）
+schedule/          Job 模型 / 存储抽象 + 进程内实现 / 调度循环（at|every|daily）
 runner/            会话键 → *agent.Agent 池、回合驱动、事件 → bus、交接自动续跑
 data/              作业/事件/状态/会话索引的原子落盘（jsonl + flock 单实例锁）
 prompt/            system 提示词基座 + 环境段（动态内容走 user 消息，保 prompt cache 不变性）；全局说明读 ivan 自己的 ~/.config/ivan/AGENTS.md，与 tanya 隔离
@@ -119,7 +119,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | D2 | 通道 | IM 只是一个 channel；所有输入输出抽象到 channel；首期只实现 QQ 官方机器人通道（非 OneBot） |
 | D3 | QQ 协议实现 | **自实现**，不使用 `tencent-connect/botgo`（长期未更新、实现质量差）；先落在 ivan 内 `qqbot/`，稳定后抽成独立 module 引入 |
 | D4 | 首期消息形态 | 仅文本 + 图片 |
-| D5 | 定时表达式 | `at`/`every` 先做，`cron_expr` 视需要再规划 |
+| D5 | 定时表达式 | **修订（2026-10-21）**：`at`/`every`/`daily`（每天固定时刻 + 时区）已做，`daily` 覆盖"每日定时汇报/提醒"的实际需求；**完整 cron 表达式不做**（`expr` 字段保留但 `Validate` 报错），将来要"每周/每月"时按需扩展 `daily` 的周期维度，不引通用解析器 |
 | D6 | 与 tanya 关系 | 共用 agent 核心，两仓库同步推进；公共模块后续按 §5 判据抽库 |
 | D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；webhook、心跳为后置可选 |
 | D8 | 作业存储 | **存储抽象接口 + sqlite 实现**（`modernc.org/sqlite`，纯 Go 无 cgo）：文件级重写不够可靠，作业状态需要事务与并发安全；接口保持窄（List/Get/Put/Delete/Close），换实现不动调度器 |

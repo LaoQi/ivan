@@ -16,7 +16,7 @@ import (
 	"github.com/LaoQi/ivan/schedule"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 3
 
 const opTimeout = 5 * time.Second
 
@@ -81,6 +81,11 @@ func (s *Store) init() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if version > 0 {
+		if err := s.migrate(ctx, version); err != nil {
+			return err
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("初始化作业数据库失败 %s: %w", s.path, err)
@@ -93,9 +98,11 @@ func (s *Store) init() error {
 		kind text not null,
 		at_ms integer not null default 0,
 		every_ms integer not null default 0,
+		at_time_ms integer not null default 0,
 		expr text not null default '',
 		tz text not null default '',
 		prompt text not null default '',
+		task_file text not null default '',
 		channel text not null default '',
 		chat_id text not null default '',
 		session_key text not null default '',
@@ -124,7 +131,7 @@ func (s *Store) init() error {
 	return nil
 }
 
-const jobColumns = `id, name, enabled, kind, at_ms, every_ms, expr, tz, prompt, channel, chat_id, session_key,
+const jobColumns = `id, name, enabled, kind, at_ms, every_ms, at_time_ms, expr, tz, prompt, task_file, channel, chat_id, session_key,
 	next_run_at_ms, last_run_at_ms, last_status, last_error, last_notify_error, last_tokens, runs,
 	delete_after_run, created_at_ms, updated_at_ms`
 
@@ -171,10 +178,11 @@ func (s *Store) Put(j schedule.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
 	_, err := s.db.ExecContext(ctx, `insert into jobs (`+jobColumns+`)
-		values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		on conflict(id) do update set
 			name=excluded.name, enabled=excluded.enabled, kind=excluded.kind, at_ms=excluded.at_ms,
-			every_ms=excluded.every_ms, expr=excluded.expr, tz=excluded.tz, prompt=excluded.prompt,
+			every_ms=excluded.every_ms, at_time_ms=excluded.at_time_ms,
+			expr=excluded.expr, tz=excluded.tz, prompt=excluded.prompt, task_file=excluded.task_file,
 			channel=excluded.channel, chat_id=excluded.chat_id, session_key=excluded.session_key,
 			next_run_at_ms=excluded.next_run_at_ms, last_run_at_ms=excluded.last_run_at_ms,
 			last_status=excluded.last_status, last_error=excluded.last_error,
@@ -182,7 +190,8 @@ func (s *Store) Put(j schedule.Job) error {
 			runs=excluded.runs, delete_after_run=excluded.delete_after_run,
 			created_at_ms=excluded.created_at_ms, updated_at_ms=excluded.updated_at_ms`,
 		j.ID, j.Name, boolInt(j.Enabled), string(j.Schedule.Kind), j.Schedule.AtMS, j.Schedule.EveryMS,
-		j.Schedule.Expr, j.Schedule.TZ, j.Payload.Prompt, j.Payload.Channel, j.Payload.ChatID,
+		j.Schedule.AtTimeMS, j.Schedule.Expr, j.Schedule.TZ, j.Payload.Prompt, j.Payload.File,
+		j.Payload.Channel, j.Payload.ChatID,
 		j.Payload.SessionKey, j.State.NextRunAtMS, j.State.LastRunAtMS, j.State.LastStatus,
 		j.State.LastError, j.State.LastNotifyError, j.State.LastTokens, j.State.Runs,
 		boolInt(j.DeleteAfterRun), j.CreatedAtMS, j.UpdatedAtMS)
@@ -207,6 +216,31 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+func (s *Store) migrate(ctx context.Context, from int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("迁移作业数据库失败 %s: %w", s.path, err)
+	}
+	defer tx.Rollback()
+	if from < 2 {
+		if _, err := tx.ExecContext(ctx, `alter table jobs add column at_time_ms integer not null default 0`); err != nil {
+			return fmt.Errorf("升级作业表失败 %s（v%d → v%d）: %w", s.path, from, SchemaVersion, err)
+		}
+	}
+	if from < 3 {
+		if _, err := tx.ExecContext(ctx, `alter table jobs add column task_file text not null default ''`); err != nil {
+			return fmt.Errorf("升级作业表失败 %s（v%d → v%d）: %w", s.path, from, SchemaVersion, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("pragma user_version = %d", SchemaVersion)); err != nil {
+		return fmt.Errorf("写作业数据库版本失败 %s: %w", s.path, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交作业数据库迁移失败 %s: %w", s.path, err)
+	}
+	return nil
+}
+
 func scan(row scanner) (schedule.Job, error) {
 	var (
 		j       schedule.Job
@@ -215,7 +249,8 @@ func scan(row scanner) (schedule.Job, error) {
 		kind    string
 	)
 	err := row.Scan(&j.ID, &j.Name, &enabled, &kind, &j.Schedule.AtMS, &j.Schedule.EveryMS,
-		&j.Schedule.Expr, &j.Schedule.TZ, &j.Payload.Prompt, &j.Payload.Channel, &j.Payload.ChatID,
+		&j.Schedule.AtTimeMS, &j.Schedule.Expr, &j.Schedule.TZ, &j.Payload.Prompt, &j.Payload.File,
+		&j.Payload.Channel, &j.Payload.ChatID,
 		&j.Payload.SessionKey, &j.State.NextRunAtMS, &j.State.LastRunAtMS, &j.State.LastStatus,
 		&j.State.LastError, &j.State.LastNotifyError, &j.State.LastTokens, &j.State.Runs,
 		&del, &j.CreatedAtMS, &j.UpdatedAtMS)

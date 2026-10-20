@@ -37,6 +37,7 @@ type Trigger struct {
 	JobID      string
 	Name       string
 	Prompt     string
+	File       string
 	Channel    string
 	ChatID     string
 	SessionKey string
@@ -247,6 +248,14 @@ func (s *Scheduler) reconcile() {
 					s.countMissed(uint64(missed))
 					s.emit(Event{Kind: EventMissed, JobID: j.ID, Name: j.Label(),
 						Text: fmt.Sprintf("停机期间错过 %d 个周期，下次 %s", missed, FromMS(next).Format("01-02 15:04:05"))})
+				case KindDaily:
+					next, missed := SkipDaily(next, j.Schedule.AtTimeMS, j.Schedule.TZ, nowMS)
+					j.State.NextRunAtMS = next
+					j.State.LastStatus = StatusMissed
+					dirty = true
+					s.countMissed(uint64(missed))
+					s.emit(Event{Kind: EventMissed, JobID: j.ID, Name: j.Label(),
+						Text: fmt.Sprintf("停机期间错过 %d 天，下次 %s", missed, FromMS(next).Format("01-02 15:04:05"))})
 				}
 			}
 		}
@@ -315,6 +324,14 @@ func (s *Scheduler) deferDue(j Job, reason string, nowMS int64) {
 			s.countMissed(uint64(missed))
 			s.emit(Event{Kind: EventPaused, JobID: j.ID, Name: j.Label(),
 				Text: fmt.Sprintf("%s，周期作业跳过 %d 次，下次 %s", reason, missed, FromMS(next).Format("01-02 15:04:05"))})
+		case KindDaily:
+			next, missed := SkipDaily(j.State.NextRunAtMS, j.Schedule.AtTimeMS, j.Schedule.TZ, nowMS)
+			j.State.NextRunAtMS = next
+			j.UpdatedAtMS = nowMS
+			s.put(j, nowMS)
+			s.countMissed(uint64(missed))
+			s.emit(Event{Kind: EventPaused, JobID: j.ID, Name: j.Label(),
+				Text: fmt.Sprintf("%s，周期作业跳过 %d 天，下次 %s", reason, missed, FromMS(next).Format("01-02 15:04:05"))})
 		}
 	}
 }
@@ -351,6 +368,7 @@ func (s *Scheduler) launch(ctx context.Context, j Job) {
 			JobID:      j.ID,
 			Name:       j.Label(),
 			Prompt:     j.Payload.Prompt,
+			File:       j.Payload.File,
 			Channel:    j.Payload.Channel,
 			ChatID:     j.Payload.ChatID,
 			SessionKey: j.Payload.SessionKey,
@@ -386,13 +404,22 @@ func (s *Scheduler) finish(base Job, planned int64, out Outcome, dur time.Durati
 	cur.State.LastError = errText
 	cur.State.LastNotifyError = brief(out.NotifyErr)
 	cur.State.LastTokens = out.Tokens
-	if cur.Schedule.Kind == KindAt {
+	switch {
+	case cur.Schedule.Kind == KindAt:
 		if !manual || planned <= nowMS {
 			cur.State.NextRunAtMS = 0
 		}
-	} else if manual && planned > nowMS {
+	case manual && planned > nowMS:
 		cur.State.NextRunAtMS = planned
-	} else {
+	case cur.Schedule.Kind == KindDaily:
+		next, missed := NextDaily(planned, cur.Schedule.AtTimeMS, cur.Schedule.TZ, nowMS)
+		cur.State.NextRunAtMS = next
+		if missed > 0 {
+			s.countMissed(uint64(missed))
+			s.emit(Event{Kind: EventMissed, JobID: cur.ID, Name: cur.Label(),
+				Text: fmt.Sprintf("本轮耗时 %s，错过 %d 天，下次 %s", dur.Round(time.Second), missed, FromMS(next).Format("01-02 15:04:05"))})
+		}
+	default:
 		next, missed := nextEvery(planned, cur.Schedule.EveryMS, nowMS)
 		if next <= nowMS {
 			next = nowMS + cur.Schedule.EveryMS
@@ -464,7 +491,8 @@ func (s *Scheduler) Update(id string, fn func(*Job) error) (Job, error) {
 	next.CreatedAtMS = cur.CreatedAtMS
 	next.State = cur.State
 	next.UpdatedAtMS = MS(s.now())
-	if next.Schedule.AtMS != cur.Schedule.AtMS || next.Schedule.EveryMS != cur.Schedule.EveryMS || next.Schedule.Kind != cur.Schedule.Kind {
+	if next.Schedule.AtMS != cur.Schedule.AtMS || next.Schedule.EveryMS != cur.Schedule.EveryMS ||
+		next.Schedule.AtTimeMS != cur.Schedule.AtTimeMS || next.Schedule.TZ != cur.Schedule.TZ || next.Schedule.Kind != cur.Schedule.Kind {
 		next.State.NextRunAtMS = 0
 		next.State.LastRunAtMS = 0
 		next.InitNext(s.now())
@@ -517,6 +545,7 @@ func (s *Scheduler) RunNow(ctx context.Context, id string) (Job, error) {
 		JobID:      j.ID,
 		Name:       j.Label(),
 		Prompt:     j.Payload.Prompt,
+		File:       j.Payload.File,
 		Channel:    j.Payload.Channel,
 		ChatID:     j.Payload.ChatID,
 		SessionKey: j.Payload.SessionKey,

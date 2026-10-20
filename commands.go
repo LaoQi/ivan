@@ -453,10 +453,19 @@ func labelOf(j schedule.Job) string {
 }
 
 func kindOf(j schedule.Job) string {
-	if j.Schedule.Kind == schedule.KindAt {
+	switch j.Schedule.Kind {
+	case schedule.KindAt:
 		return "一次性"
+	case schedule.KindDaily:
+		d := time.Duration(j.Schedule.AtTimeMS) * time.Millisecond
+		out := fmt.Sprintf("每天 %02d:%02d", int(d.Hours()), int(d.Minutes())%60)
+		if j.Schedule.TZ != "" {
+			out += " " + j.Schedule.TZ
+		}
+		return out
+	default:
+		return "每 " + (time.Duration(j.Schedule.EveryMS) * time.Millisecond).String()
 	}
-	return "每 " + (time.Duration(j.Schedule.EveryMS) * time.Millisecond).String()
 }
 
 func jobsTime(ms int64) string {
