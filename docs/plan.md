@@ -106,7 +106,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | P0 | 复用探针 + 仓库骨架：go.work、config、`ivan run` 前台单发 + 事件日志 | 无 TTY 下 `run_shell` 正常、`interactive` 明确报错不卡、交接自动续跑、`LoadSession` 恢复、多实例并发；产出 `docs/reuse-probe.md` |
 | P1 | `bus` + `channel` 抽象 + `cli`/`log` 通道 + daemon（socket、单实例锁、优雅停机、status） | ✅ 两个通道跑通；daemon 重启后状态可查、会话可续（`docs/channels.md` §10、`docs/sessions.md` §9） |
 | P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**单聊全链路已通**（入站→回合→回复），群 @/图片待验（`docs/qq-bot.md` §13） |
-| P3 | 定时与计划任务：Job 存储（抽象 + sqlite）、调度循环、`schedule` 工具、结果回原渠道 | ✅ 重启后作业恢复；模型自建 `at`/`every` 作业按时触发并把结果发回原会话（本地端到端全绿，QQ 真机提醒待验；`docs/schedule.md` §8） |
+| P3 | 定时与计划任务：Job 存储（抽象 + sqlite）、调度循环、`schedule` 工具、结果回原渠道 | ✅ 重启后作业恢复；模型自建 `at`/`every` 作业按时触发并把结果发回原会话（本地端到端全绿 + **QQ 真机提醒通过**；`docs/schedule.md` §8） |
 | P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接、按需读取的记忆/目标文件、预算熔断、暂停开关 | 在指定低风险工作区开启后，单条消息触发能跨会话推进并被轮次/预算/暂停约束住；不承诺无人值守完成开放目标 |
 | P5 | 安全与运维：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 危险命令被拦；服务随 systemd 起停 |
 

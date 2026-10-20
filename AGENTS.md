@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P3 已完成**（`schedule/` 作业模型 + 调度循环、`schedule/sqlite` 存储实现、`schedule` 工具、daemon 接线、`ivan jobs`/`pause`/`resume`；单测与 daemon 端到端全绿，QQ 真机"到点提醒"待用户在场实测）；下一步 P4（受控推进）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
+> 状态：**P3 已完成**（`schedule/` 作业模型 + 调度循环、`schedule/sqlite` 存储实现、`schedule` 工具、daemon 接线、`ivan jobs`/`pause`/`resume`；单测与 daemon 端到端全绿，QQ 真机"到点提醒"已通：单聊建作业 → 到点触发 → 主动消息回投）；下一步 P4（受控推进）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
 
 ## 设计约束
 

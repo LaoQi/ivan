@@ -108,7 +108,7 @@ type Store interface {
 3. 模型在 QQ 里说"10 分钟后提醒我喝水" → 自动建作业 → 到点收到 QQ 消息。
 4. 长作业超过周期 → 跳过而非堆积，日志可见。
 
-状态：1/2/4 已由单测与 daemon 端到端覆盖（§8.5）；3 的本地等价链路已覆盖（假 LLM 走 `schedule` 工具建 `at` 作业 → 到点触发 → 结果回投），**QQ 真机提醒待用户在场实测**（需要用户先给机器人发一条消息建作业）。
+状态：1/2/4 已由单测与 daemon 端到端覆盖（§8.5）；**3 已真机通过**（2026-10-20，生产凭证）：单聊说"1 分钟后提醒我喝水" → 模型建 `at` 作业（目标继承 `qq:c2c:<openid>`）→ 到点触发 → 结果以主动消息回投原单聊（`qq sent=2 send_errors=0`），`at` 作业默认执行后自删。
 
 ## 8 P3 实现记录（2026-10-20）
 
@@ -152,4 +152,5 @@ type Store interface {
 - `schedule`：到期触发一次并推进、长作业不重入 + 记错过、一次性作业自删、`missed_policy` run/skip、启动补偿、暂停保留 `at`、预算阻塞并推进 `every`、失败/通知失败落状态、`RunNow` 不改计划、Update/Remove、`running` → `interrupted`。
 - `schedule/sqlite`：全字段往返、重开持久化、损坏文件显式报错且原文件不变、版本过新拒绝、8 并发读写（`-race`）。
 - `daemon`：播种作业 → 到点触发 → `last_status=ok` + 下次推进 + `unmatched` 计数 + `status.schedule` + `jobs/list` 控制指令 + 暂停/恢复；停机重启后作业恢复；**模型经 `schedule` 工具建 `at` 作业 → 到点触发 → 结果回灌**（假 LLM）；`schedule.enabled=false` 时明确报错。
+- 真机（生产 QQ 凭证，临时数据目录）：单聊"1 分钟后提醒我喝水" → 模型建作业 → `job_trigger`/`turn_start channel=schedule`/`job_done runs=1 tokens=3053` → 主动消息回投成功（`qq sent=2 send_errors=0`），用户侧收到提醒；验完 `SIGTERM` 停机并清理临时目录。
 - `runner`：工具继承当前会话目标、参数校验、`TriggerJob` 直投 `ReplyChannel` 且不回 Bus、通知失败不影响执行判定。
