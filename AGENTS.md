@@ -30,7 +30,7 @@
 - 定时作业：触发由 runner **同步**执行（`Runner.TriggerJob`），作业状态以真实回合结果为准；出站按 `InboundMessage.ReplyChannel` **直投**（不走 Bus）以便拿到投递错误；作业目标会话只由 runner 注入，模型不可指定；配额默认不限
 - 持久化一律原子写（临时文件 + fsync + rename）；解析失败保留原文件并显式报错，**不静默重建**
 - 启动拒绝 root（复用 `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致
-- 部署纪律：部署态只做只读探测；功能验证在本地或临时环境完成
+- 部署纪律：部署态只做只读探测；功能验证在本地或临时环境完成。生产部署的具体形态（主机、路径、单元、作业）属于部署方环境，**不写进本仓库**；生产上的写操作允许直接执行，但要有明确目的、做完收拾干净
 - **会话目录按会话键隔离**：每个 `SessionKey` 一个工作区目录 `<data_dir>/agents/<key-slug>/`（tanya 会话 id 为秒级时间戳，多实例共享工作区会互相覆盖，见 `docs/reuse-probe.md` R11）
 - **`tools.Options.Workspace` 必须是动态闭包**指向 `agent.Workspace()`，不得用静态 `os.Getwd()` 值（`SwitchWorkspace` 不会自动同步，见 R7）
 - **会话映射持久化在 `state.json`**（原子写，损坏即报错拒绝启动，不静默重建）；实例池懒建、同键串行、跨键并发上限、按 LRU/闲置回收

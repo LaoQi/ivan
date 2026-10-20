@@ -6,7 +6,7 @@
 ## 1 方法
 
 - **假 LLM 驱动**：`internal/fakellm` 起一个 OpenAI chat 兼容的 httptest 服务（SSE，支持 content / reasoning / tool_calls / usage），按脚本逐步返回。探针因此**确定性、零成本、可重复**，可进 `go test -race`。
-- **真机冒烟**：用 tanya 配置借来的凭证（`内网主机:LLM网关端口/v1`、`auto-flash`）跑一次 `ivan run`，验证真实网关下工具调用、事件落盘与回合结算。
+- **真机冒烟**：用 tanya 配置借来的凭证（本机 LLM 网关、`auto-flash`）跑一次 `ivan run`，验证真实网关下工具调用、事件落盘与回合结算。
 - 环境：Go 1.27.1，Linux；tanya 经 `go.work` + `replace ../tanya` 引用。
 
 ## 2 结果

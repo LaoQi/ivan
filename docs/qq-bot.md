@@ -144,16 +144,15 @@ channels:
 
 其他：`msg_type` `0` 文本 / `2` markdown / `7` 富媒体；相同 `msg_id`+`msg_seq` 重复发送失败；机器人须 WebSocket 在线才能发消息；用户可关闭"允许主动发送"。
 
-## 12 凭证与现网参数
+## 12 凭证与部署参数
 
-- 机器人：`app_id = <app_id>`（用户名「机器人账号」），走**生产**环境。
-- `app_secret` **不写入仓库、不写入文档、不进日志**。取值路径（NAS 上，`0600`）：
-  `ssh 内网主机` → `~/原部署/.security.yml` 的 `channel_list.qq.settings.app_secret`。
-  ivan 侧配置通过 `IVAN_QQ_APP_SECRET` 环境变量或 `channels.qq.app_secret`（文件 0600）注入。
-- 现网占用情况：picoclaw 的 QQ 通道**自 2026-10-19 起启动失败**（`/gateway/bot` 返回 `401 code 11241 请求头Authorization参数格式错误`，botgo v0.2.1 与新网关不兼容），
-  其 launcher/gateway 进程虽在跑但**未占用 ws 连接**，ivan 可直接使用该凭证。
-  若日后修复 picoclaw 并重新启用 QQ 通道，两边会争抢事件与 `msg_seq` → **同一 appid 只允许一个在线实现**，启用 ivan 前先停 picoclaw 的 qq 通道。
-- 该凭证的历史日志（`~/原部署/logs/gateway.log`）里曾**明文出现 app_secret 与 access_token**（botgo debug 日志），已是既成事实，但更说明 ivan 侧必须守住「凭证不进日志」。
+- **凭证一律不进仓库、不进文档、不进日志**：`app_id` 与 `app_secret` 由部署方自行提供，
+  ivan 侧经 `IVAN_QQ_APP_ID` / `IVAN_QQ_APP_SECRET` 环境变量，或 `channels.qq.app_id` /
+  `channels.qq.app_secret`（配置文件 0600）注入。文档与示例配置只留空值占位。
+- **同一 appid 只允许一个在线实现**：同一个机器人凭证不能有两处同时在线的 WebSocket 实现，
+  否则会争抢事件与 `msg_seq`。部署新实例前先停掉旧实例。
+- 排障时若怀疑凭证形态，先用只读请求核对 `POST /app/getAppAccessToken` 与 `/gateway/bot` 的返回，
+  不要把 token / secret 打进日志。
 
 ## 13 P2 实现记录（2026-10-20）
 
