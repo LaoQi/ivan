@@ -12,8 +12,10 @@ import (
 	"github.com/LaoQi/ivan/channel"
 	"github.com/LaoQi/ivan/channel/cli"
 	chlog "github.com/LaoQi/ivan/channel/log"
+	qqchan "github.com/LaoQi/ivan/channel/qq"
 	"github.com/LaoQi/ivan/config"
 	"github.com/LaoQi/ivan/data"
+	"github.com/LaoQi/ivan/qqbot"
 	"github.com/LaoQi/ivan/runner"
 )
 
@@ -42,6 +44,7 @@ type Status struct {
 	Logs          LogsStatus       `json:"logs"`
 	Runner        runner.Status    `json:"runner"`
 	Channels      []channel.Status `json:"channels"`
+	QQ            qqbot.Stats      `json:"qq,omitempty"`
 }
 
 type Daemon struct {
@@ -58,6 +61,7 @@ type Daemon struct {
 	bus     *bus.Bus
 	mgr     *channel.Manager
 	cli     *cli.Socket
+	qq      *qqchan.Channel
 	runner  *runner.Runner
 
 	releaseOnce bool
@@ -103,6 +107,31 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 	if err := d.mgr.Register(d.cli); err != nil {
 		d.Release()
 		return nil, err
+	}
+	if cfg.QQEnabled() {
+		qq, err := qqchan.New(qqchan.Config{
+			AppID:          cfg.Channels.QQ.AppID,
+			AppSecret:      cfg.Channels.QQ.AppSecret,
+			APIBase:        cfg.Channels.QQ.APIBase,
+			TokenURL:       cfg.Channels.QQ.TokenURL,
+			GatewayURL:     cfg.Channels.QQ.GatewayURL,
+			AllowFrom:      cfg.Channels.QQ.AllowFrom,
+			AllowGroups:    cfg.Channels.QQ.AllowGroups,
+			MaxMessageLen:  cfg.Channels.QQ.MaxMessageLen,
+			AllowProactive: cfg.Channels.QQ.AllowProactive,
+			ReconnectMax:   time.Duration(cfg.Channels.QQ.ReconnectMaxSec) * time.Second,
+			MediaDir:       cfg.MediaDir(),
+			Logf:           func(format string, args ...any) { _ = d.human.Notice(format, args...) },
+		})
+		if err != nil {
+			d.Release()
+			return nil, err
+		}
+		if err := d.mgr.Register(qq); err != nil {
+			d.Release()
+			return nil, err
+		}
+		d.qq = qq
 	}
 	r, err := runner.New(runner.Options{
 		Cfg:   cfg,
@@ -189,6 +218,9 @@ func (d *Daemon) Status() Status {
 	}
 	if d.mgr != nil {
 		st.Channels = d.mgr.Status()
+	}
+	if d.qq != nil {
+		st.QQ = d.qq.Stats()
 	}
 	return st
 }

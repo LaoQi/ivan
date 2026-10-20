@@ -56,3 +56,18 @@ channels:
   # 本地 cli 通道（unix socket，ivan send/status 用它）
   cli:
     enabled: true
+  # QQ 官方机器人通道（见 docs/qq-bot.md）
+  qq:
+    enabled: false
+    # 凭证从环境变量 IVAN_QQ_APP_ID / IVAN_QQ_APP_SECRET 注入更安全（文件需 0600）
+    app_id: ""
+    app_secret: ""
+    # 允许的 openid / group_openid 白名单，空 = 全部允许
+    allow_from: []
+    allow_groups: []
+    # 出站切分上限（通用切分器生效；cli 通道不切分）
+    max_message_len: 1200
+    # 被动回复窗口用尽后是否允许转为主动消息（平台频控 + 用户可关闭）
+    allow_proactive: false
+    # 网关重连指数退避上限（秒）
+    reconnect_max_sec: 60

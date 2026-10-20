@@ -52,8 +52,23 @@ type CLIConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type QQConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	AppID           string   `yaml:"app_id"`
+	AppSecret       string   `yaml:"app_secret"`
+	APIBase         string   `yaml:"api_base"`
+	TokenURL        string   `yaml:"token_url"`
+	GatewayURL      string   `yaml:"gateway_url"`
+	AllowFrom       []string `yaml:"allow_from"`
+	AllowGroups     []string `yaml:"allow_groups"`
+	MaxMessageLen   int      `yaml:"max_message_len"`
+	AllowProactive  bool     `yaml:"allow_proactive"`
+	ReconnectMaxSec int      `yaml:"reconnect_max_sec"`
+}
+
 type ChannelsConfig struct {
 	CLI CLIConfig `yaml:"cli"`
+	QQ  QQConfig  `yaml:"qq"`
 }
 
 type Config struct {
@@ -101,7 +116,10 @@ func Default() *Config {
 			ShutdownTimeoutSeconds: DefaultShutdownSeconds,
 			SendTimeoutSeconds:     DefaultSendSeconds,
 		},
-		Channels:      ChannelsConfig{CLI: CLIConfig{Enabled: true}},
+		Channels: ChannelsConfig{
+			CLI: CLIConfig{Enabled: true},
+			QQ:  QQConfig{MaxMessageLen: 1200, ReconnectMaxSec: 60},
+		},
 		ImageMaxBytes: agent.DefaultImageMaxBytes,
 		ImageResize:   true,
 		Path:          path,
@@ -155,6 +173,8 @@ func applyEnv(cfg *Config) {
 	set("SESSION_MODE", &cfg.SessionMode)
 	set("IMAGE_DETAIL", &cfg.ImageDetail)
 	set("SOCKET", &cfg.Daemon.Socket)
+	set("QQ_APP_ID", &cfg.Channels.QQ.AppID)
+	set("QQ_APP_SECRET", &cfg.Channels.QQ.AppSecret)
 }
 
 func (c *Config) normalize() {
@@ -182,6 +202,12 @@ func (c *Config) normalize() {
 	}
 	if c.Runner.MaxTurnsPerTask <= 0 {
 		c.Runner.MaxTurnsPerTask = 8
+	}
+	if c.Channels.QQ.MaxMessageLen <= 0 {
+		c.Channels.QQ.MaxMessageLen = 1200
+	}
+	if c.Channels.QQ.ReconnectMaxSec <= 0 {
+		c.Channels.QQ.ReconnectMaxSec = 60
 	}
 }
 
@@ -221,6 +247,12 @@ func (c *Config) IdleTimeout() time.Duration {
 }
 
 func (c *Config) CLIEnabled() bool { return c.Channels.CLI.Enabled }
+
+func (c *Config) QQEnabled() bool {
+	return c.Channels.QQ.Enabled
+}
+
+func (c *Config) MediaDir() string { return filepath.Join(c.DataDir, "media") }
 
 func expandHome(p string) string {
 	p = strings.TrimSpace(p)

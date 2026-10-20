@@ -7,6 +7,9 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require golang.org/x/sys v0.0.0-20220310020820-b874c991c1a5 // indirect
+require (
+	github.com/gorilla/websocket v1.5.3 // indirect
+	golang.org/x/sys v0.0.0-20220310020820-b874c991c1a5 // indirect
+)
 
 replace github.com/LaoQi/tanya => ../tanya
