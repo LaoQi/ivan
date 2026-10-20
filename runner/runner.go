@@ -102,7 +102,7 @@ func (r *Runner) Dispatch(ctx context.Context, msg bus.InboundMessage) error {
 	if r.closed.Load() {
 		return errors.New("runner 已关闭")
 	}
-	if strings.TrimSpace(msg.Content) == "" {
+	if strings.TrimSpace(msg.Content) == "" && len(msg.Media) == 0 {
 		return errors.New("入站消息内容为空")
 	}
 	key := bus.SessionKey(msg)
@@ -284,6 +284,27 @@ type task struct {
 	context int
 }
 
+func promptOf(msg bus.InboundMessage) string {
+	text := strings.TrimSpace(msg.Content)
+	if len(msg.Media) == 0 {
+		return text
+	}
+	var b strings.Builder
+	if text != "" {
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	fmt.Fprintf(&b, "用户发送了 %d 个附件（本地已缓存，可用 read_image 查看）：\n", len(msg.Media))
+	for i, m := range msg.Media {
+		label := m.Name
+		if label == "" {
+			label = fmt.Sprintf("附件%d", i+1)
+		}
+		fmt.Fprintf(&b, "- %s（%s，%d 字节）：%s\n", label, m.MIME, m.Bytes, m.Path)
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func (t *task) run(ctx context.Context) error {
 	defer func() {
 		if ag := t.inst.ag; ag != nil {
@@ -299,7 +320,7 @@ func (t *task) run(ctx context.Context) error {
 		sink := agent.Sinks(t.sink, t.r.logEvent)
 		t.r.human(chlog.Event{Kind: "turn_start", Session: t.key, Channel: t.msg.Channel, Text: turnLabel(turn)})
 		if turn == 0 {
-			err = ag.Ask(ctx, t.msg.Content, sink)
+			err = ag.Ask(ctx, promptOf(t.msg), sink)
 		} else {
 			err = ag.Continue(ctx, sink)
 		}

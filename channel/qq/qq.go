@@ -2,6 +2,8 @@ package qq
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -295,7 +297,7 @@ func mediaName(id string, att qqbot.Attachment, idx int) string {
 	if ext == "" {
 		ext = ".bin"
 	}
-	return fmt.Sprintf("%s-%d%s", shortID(id), idx, ext)
+	return fmt.Sprintf("%s-%d%s", idDigest(id), idx, ext)
 }
 
 func extFromContentType(ct string) string {
@@ -434,6 +436,11 @@ func (c *Channel) nextSeq(replyTo string, group bool) (int, string, error) {
 	}
 	st.count++
 	return st.count, replyTo, nil
+}
+
+func idDigest(id string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(id)))
+	return hex.EncodeToString(sum[:6])
 }
 
 func shortID(id string) string {

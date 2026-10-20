@@ -372,3 +372,42 @@ func TestDispatchAfterClose(t *testing.T) {
 		t.Fatalf("关闭后应拒绝: %v", err)
 	}
 }
+
+func TestPromptOfIncludesMediaPaths(t *testing.T) {
+	msg := bus.InboundMessage{
+		Channel: "qq", ChatID: "u", Content: "",
+		Media: []bus.MediaRef{{Path: "/tmp/a.jpg", MIME: "image/jpeg", Name: "a.jpg", Bytes: 1234}},
+	}
+	got := promptOf(msg)
+	if !strings.Contains(got, "/tmp/a.jpg") || !strings.Contains(got, "read_image") {
+		t.Fatalf("提示应包含本地路径与 read_image 提示: %q", got)
+	}
+	if !strings.Contains(got, "1234 字节") {
+		t.Fatalf("提示应包含字节数: %q", got)
+	}
+}
+
+func TestPromptOfPlainText(t *testing.T) {
+	if got := promptOf(bus.InboundMessage{Content: " 你好 "}); got != "你好" {
+		t.Fatalf("纯文本应原样返回，得到 %q", got)
+	}
+}
+
+func TestDispatchAcceptsMediaOnlyMessage(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Content: "看到图片了"})
+	rig := newRig(t, srv)
+	msg := bus.InboundMessage{
+		Channel: "qq", ChatID: "u-1", ChatType: bus.ChatDirect, MessageID: "m-1",
+		Media: []bus.MediaRef{{Path: "/tmp/a.jpg", MIME: "image/jpeg", Name: "a.jpg", Bytes: 10}},
+	}
+	if err := rig.r.Dispatch(context.Background(), msg); err != nil {
+		t.Fatalf("仅有附件的消息应被受理，得到 %v", err)
+	}
+	reqs := srv.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("应至少调用一次模型")
+	}
+	if !strings.Contains(string(reqs[0].Messages[len(reqs[0].Messages)-1]), "/tmp/a.jpg") {
+		t.Fatalf("模型应看到附件路径，实际: %s", reqs[0].Messages[len(reqs[0].Messages)-1])
+	}
+}

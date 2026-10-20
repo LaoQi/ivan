@@ -371,3 +371,26 @@ func TestNewRequiresCredentials(t *testing.T) {
 		t.Fatal("缺凭证应报错")
 	}
 }
+
+func TestMediaNamesDoNotCollide(t *testing.T) {
+	ids := []string{
+		"ROBOT1.0_aaaaaaaaaaaaaaaaaaaaaa!",
+		"ROBOT1.0_bbbbbbbbbbbbbbbbbbbbbb!",
+	}
+	seen := map[string]bool{}
+	for i, id := range ids {
+		ev := directEvent(id, "u-1", "图")
+		ev.Attachments = []qqbot.Attachment{{URL: "http://example.invalid/x.png", ContentType: "image/png"}}
+		got := mediaName(ev.ID, ev.Attachments[0], 0)
+		if seen[got] {
+			t.Fatalf("第 %d 个附件文件名与之前碰撞: %s", i+1, got)
+		}
+		seen[got] = true
+		if strings.Contains(got, "ROBOT1.0") {
+			t.Fatalf("文件名不应沿用 msg id 前缀: %s", got)
+		}
+	}
+	if mediaName(ids[0], qqbot.Attachment{ContentType: "image/png"}, 0) == mediaName(ids[1], qqbot.Attachment{ContentType: "image/png"}, 0) {
+		t.Fatal("不同消息 id 应得到不同文件名")
+	}
+}

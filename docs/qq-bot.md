@@ -200,6 +200,10 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 - **入站 + 全链路（daemon 端到端）通过**：用户向机器人实发单聊消息后，daemon 侧 `qq.messages=1`、`runner.turns=1`、`failures=0`、`qq.sent=1`；
   日志显示 `turn_start session=qq:c2c:<openid> channel=qq` → `run_shell` 在**该会话独立工作区** `<data_dir>/agents/qq-c2c-<openid>/` 执行 → `turn_end`，
   用户侧收到回复（被动回复 `msg_seq=1`）。
+- **图片入站已通**：用户发图 → 下载落 `media/`（`idDigest-序号.jpg`）→ 提示词注入本地路径 → 模型 `read_image` 读取 → 回复。
+  期间修掉两个 bug：①runner 拒收「无正文仅附件」消息（`入站消息内容为空`）→ 改为附件非空也受理，并把附件路径/类型/字节数注入提示词（`promptOf`）；
+  ②附件文件名用 `msg id` 前 8 字符 → QQ 消息 id 均以 `ROBOT1.0_` 开头导致**同名互相覆盖** → 改用 `sha256(msg id)` 前 12 位十六进制。
+- **群 @ 已通**：用户把机器人拉群并 @ 后 `turn_start session=qq:group:<group_openid>`，正常回复。
 - **图片出站已通**：`≤5MB` 走 `file_data`、`>5MB` 走分片（6.2MB → 2 片，`upload_prepare`/分片 `PUT`/`upload_part_finish`/`files` 合并全 200），用户侧收到图片。
-- **尚未验证**：群 @（`GROUP_AT_MESSAGE_CREATE`，需机器人被拉群）；**图片入站**（下载路径仅单测覆盖）。
+- **P2 全部能力已真机验证**：单聊文本、群 @、图片收发（内联 + 分片）、被动回复、去重、重连。
 - 期间发现并修正了 §4 的 `token` 前缀问题（裸 token 直接被 `op9` 拒绝）。
