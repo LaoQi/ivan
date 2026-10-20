@@ -73,9 +73,17 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
   - **用户可在 QQ 客户端关闭"允许主动发送"，关闭后一律发送失败** → 通知定位为 **best-effort**，失败必须计数并可见，不得承诺投达。
   - 互动召回（`is_wakeup: true`）：用户对话后 30 天内仅 4 个周期各 1 条，**不作为常规通知手段**。
 - **功能前提**：官方要求机器人保持 WebSocket 在线才能发送消息 → 重连健壮性是功能前提而非体验优化。
-- 图片：先上传 `/v2/users/{openid}/files`（单聊）或群对应接口（**单聊与群聊上传接口不互通**），`file_type: 1`，得到 `file_info`（`file_uuid`/`ttl`），再以 `msg_type: 7` + `media.file_info` 发送。官方推荐**分片上传**（无需公网 CDN），整文件上传为备选；`ttl` 过期需重传，适配器缓存 `file_uuid` 并处理失效重传。
+- 图片：先上传 `/v2/users/{openid}/files`（单聊）或群对应接口（**单聊与群聊上传接口不互通**），`file_type: 1`，得到 `file_info`（`file_uuid`/`ttl`），再以 `msg_type: 7` + `media.file_info` 发送。`ttl` 过期需重传。
+- **分片上传（已实现，官方推荐）**：`≤5MB` 走 `file_data`（base64 内联）；`>5MB` 走四步——
+  ①`POST /v2/{users\|groups}/{openid}/upload_prepare`（10 QPS）传 `{file_type, file_size(字符串), file_name, md5, sha1, md5_10m}`
+  （`md5_10m` = 前 **10002432** 字节的 MD5）→ 返回 `{upload_id, block_size(字符串), parts:[{index, presigned_url, block_size}], upload_config}`；
+  ②每片 `PUT presigned_url`（裸字节，不带 `Authorization`）；③`POST .../upload_part_finish` 传 `{upload_id, part_index, block_size, md5}`；
+  ④全部分片完成后 `POST .../files` 传 `{file_type, file_name, upload_id, srv_send_msg:false}` 合并 → `file_info`。
+  **实测坑**：`parts[].index` **从 1 开始**（文档写"从 0 开始"）→ 不能用 `index × block_size` 算偏移，必须按 index 排序后**顺序累计**切分，
+  否则首片为空、合并报 `40034002 富媒体文件格式不支持`。
 - 消息长度：官方未给硬上限（picoclaw 配置用 2000），本期按 `max_message_len`（默认 1200）保守切分，走通用切分器（见 `docs/channels.md` §6）。
-- 图片上传（已核对）：`POST /v2/users/{user_openid}/files`（50 QPS）与 `/v2/groups/{group_openid}/files`；`file_type: 1` 图片（png/jpg）；三种传法——`file_data` 二进制 ≤5MB、`url`（http 开头，平台转存）、分片（`upload_prepare` → `upload_part` → `upload_part_finish`）；`srv_send_msg: false` 只返回 `file_info`，再以 `msg_type: 7` + `media.file_info` 发。
+- 图片上传（已核对）：`POST /v2/users/{user_openid}/files`（50 QPS）与 `/v2/groups/{group_openid}/files`；`file_type: 1` 图片（png/jpg），软限制 20MB / 硬限制 200MB；三种传法——`file_data`（base64）≤5MB、`url`（http 开头，平台转存）、分片（`upload_prepare` → 分片 `PUT` → `upload_part_finish` → `files` 合并，见 §6）；`srv_send_msg: false` 只返回 `file_info`，再以 `msg_type: 7` + `media.file_info` 发。
+  **实测补充**：除体积外还有**像素尺寸**限制——700×3486（2.44M 像素）的合法 PNG 被拒 `850019/40034002 富媒体文件格式不支持`，1300×1300 与 1300×1600 均正常。
 - 限流：发送失败带平台错误码时，区分「限流」「权限不足」「参数错误」「凭证失效」，分别退避重试 / 直接失败 / 记录待查。
 
 ## 7 入站处理
@@ -192,5 +200,6 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 - **入站 + 全链路（daemon 端到端）通过**：用户向机器人实发单聊消息后，daemon 侧 `qq.messages=1`、`runner.turns=1`、`failures=0`、`qq.sent=1`；
   日志显示 `turn_start session=qq:c2c:<openid> channel=qq` → `run_shell` 在**该会话独立工作区** `<data_dir>/agents/qq-c2c-<openid>/` 执行 → `turn_end`，
   用户侧收到回复（被动回复 `msg_seq=1`）。
-- **尚未验证**：群 @（`GROUP_AT_MESSAGE_CREATE`，需机器人被拉群）；图片收发（上传/下载路径仅单测覆盖）；分片上传未实现。
+- **图片出站已通**：`≤5MB` 走 `file_data`、`>5MB` 走分片（6.2MB → 2 片，`upload_prepare`/分片 `PUT`/`upload_part_finish`/`files` 合并全 200），用户侧收到图片。
+- **尚未验证**：群 @（`GROUP_AT_MESSAGE_CREATE`，需机器人被拉群）；**图片入站**（下载路径仅单测覆盖）。
 - 期间发现并修正了 §4 的 `token` 前缀问题（裸 token 直接被 `op9` 拒绝）。

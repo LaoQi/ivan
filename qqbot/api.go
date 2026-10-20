@@ -143,47 +143,22 @@ func (c *Client) SendTextReply(ctx context.Context, target Target, content strin
 }
 
 func (c *Client) UploadImageBytes(ctx context.Context, target Target, data []byte) (string, error) {
-	if !target.valid() {
-		return "", errNoTarget
-	}
-	payload := map[string]any{
-		"file_type":    1,
-		"file_data":    base64.StdEncoding.EncodeToString(data),
-		"srv_send_msg": false,
-	}
-	raw, err := c.doREST(ctx, "upload", http.MethodPost, target.filesPath(), payload)
-	if err != nil {
-		return "", err
-	}
-	var out uploadResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("解析上传响应失败: %w", err)
-	}
-	if out.FileInfo == "" {
-		return "", fmt.Errorf("qqbot 上传响应缺少 file_info")
-	}
-	return out.FileInfo, nil
+	return c.UploadImage(ctx, target, "image.png", data)
 }
 
 func (c *Client) UploadImageURL(ctx context.Context, target Target, url string) (string, error) {
 	if !target.valid() {
 		return "", errNoTarget
 	}
-	payload := map[string]any{
+	raw, err := c.uploadRequest(ctx, target, map[string]any{
 		"file_type":    1,
 		"url":          url,
 		"srv_send_msg": false,
-	}
-	raw, err := c.doREST(ctx, "upload", http.MethodPost, target.filesPath(), payload)
+	})
 	if err != nil {
 		return "", err
 	}
-	var out uploadResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("解析上传响应失败: %w", err)
-	}
-	if out.FileInfo == "" {
-		return "", fmt.Errorf("qqbot 上传响应缺少 file_info")
-	}
-	return out.FileInfo, nil
+	return fileInfoOf(raw)
 }
+
+func encodeBase64(data []byte) string { return base64.StdEncoding.EncodeToString(data) }

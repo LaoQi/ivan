@@ -3,6 +3,7 @@ package qqbot
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,8 @@ type Client struct {
 	tokens  *tokenSource
 	dedup   *msgCache
 	handler Handler
+
+	presign *http.Client
 
 	mu        sync.Mutex
 	ws        *wsConn

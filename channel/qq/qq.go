@@ -20,7 +20,7 @@ import (
 const (
 	Name           = "qq"
 	DefaultMaxLen  = 1200
-	DefaultMediaMB = 5
+	DefaultMediaMB = 20
 )
 
 const (
@@ -372,9 +372,13 @@ func (c *Channel) upload(ctx context.Context, target qqbot.Target, ref bus.Media
 		return "", err
 	}
 	if int64(len(data)) > c.cfg.MediaMaxBytes {
-		return "", fmt.Errorf("图片超过 %d 字节上限，需改走分片上传", c.cfg.MediaMaxBytes)
+		return "", fmt.Errorf("图片超过 %d 字节上限", c.cfg.MediaMaxBytes)
 	}
-	return c.client.UploadImageBytes(ctx, target, data)
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		name = filepath.Base(ref.Path)
+	}
+	return c.client.UploadImage(ctx, target, name, data)
 }
 
 func (c *Channel) resolveTarget(msg bus.OutboundMessage) (qqbot.Target, bool) {

@@ -3,6 +3,8 @@ package qqbot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +33,10 @@ type fakeGateway struct {
 	wmu          sync.Mutex
 	sends        []sendCall
 	userAgents   []string
+	prepares     []map[string]any
+	partFinishes []map[string]any
+	partBodies   []string
+	fileUploads  []map[string]any
 	pending      []map[string]any
 	sendStatus   int
 	sendBody     string
@@ -63,8 +69,9 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 		_, _ = w.Write([]byte(`{"access_token":"tok-abc","expires_in":"3600"}`))
 	})
 	mux.HandleFunc("/ws", f.serveWS)
-	mux.HandleFunc("/v2/users/", f.serveSend)
-	mux.HandleFunc("/v2/groups/", f.serveSend)
+	mux.HandleFunc("/v2/users/", f.serveAPI)
+	mux.HandleFunc("/v2/groups/", f.serveAPI)
+	mux.HandleFunc("/part/", f.servePresigned)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -123,6 +130,70 @@ func (f *fakeGateway) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (f *fakeGateway) serveAPI(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/upload_prepare") {
+		f.servePrepare(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/upload_part_finish") {
+		f.servePartFinish(w, r)
+		return
+	}
+	f.serveSend(w, r)
+}
+
+func (f *fakeGateway) servePrepare(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	size := 0
+	if v, ok := body["file_size"].(string); ok {
+		fmt.Sscanf(v, "%d", &size)
+	}
+	block := 1 << 20
+	parts := []map[string]any{}
+	for i, off := 0, 0; off < size; i, off = i+1, off+block {
+		n := block
+		if size-off < block {
+			n = size - off
+		}
+		parts = append(parts, map[string]any{
+			"index":         i + 1,
+			"presigned_url": f.srv.URL + fmt.Sprintf("/part/%d?size=%d", i, n),
+			"block_size":    fmt.Sprintf("%d", block),
+		})
+	}
+	f.mu.Lock()
+	f.prepares = append(f.prepares, body)
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"upload_id": "up-1", "block_size": fmt.Sprintf("%d", block), "parts": parts,
+		"upload_config": map[string]any{"concurrency": 1, "retry_timeout": 300, "retry_delay": 1},
+	})
+}
+
+func (f *fakeGateway) servePartFinish(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
+	f.partFinishes = append(f.partFinishes, body)
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func (f *fakeGateway) servePresigned(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	data, _ := io.ReadAll(r.Body)
+	f.mu.Lock()
+	f.partBodies = append(f.partBodies, string(data))
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
 func (f *fakeGateway) serveSend(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "QQBot tok-abc" {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -139,6 +210,14 @@ func (f *fakeGateway) serveSend(w http.ResponseWriter, r *http.Request) {
 	}
 	body := map[string]any{}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if strings.HasSuffix(r.URL.Path, "/files") {
+		f.mu.Lock()
+		f.fileUploads = append(f.fileUploads, body)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"file_uuid":"fu-1","file_info":"fi-1","ttl":300}`))
+		return
+	}
 	f.mu.Lock()
 	f.sends = append(f.sends, sendCall{Path: r.URL.Path, Body: body})
 	f.userAgents = append(f.userAgents, r.Header.Get("User-Agent"))

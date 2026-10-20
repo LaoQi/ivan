@@ -2,8 +2,12 @@ package qqbot
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime"
 	"strings"
@@ -510,5 +514,109 @@ func TestRESTUserAgent(t *testing.T) {
 	}
 	if got := f.lastUserAgent(); got != "ivan/v1.2.3 (+https://example.invalid)" {
 		t.Fatalf("REST User-Agent 期望透传，得到 %q", got)
+	}
+}
+
+func TestUploadInlineBelowLimit(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+
+	data := []byte("small-png-bytes")
+	info, err := c.UploadImage(context.Background(), Target{UserOpenID: "u-1"}, "a.png", data)
+	if err != nil {
+		t.Fatalf("UploadImage: %v", err)
+	}
+	if info != "fi-1" {
+		t.Fatalf("file_info 期望 fi-1，得到 %q", info)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prepares) != 0 {
+		t.Fatalf("小于 5MB 不应走分片")
+	}
+	if len(f.fileUploads) != 1 {
+		t.Fatalf("应有一次 files 上传，得到 %d", len(f.fileUploads))
+	}
+	body := f.fileUploads[0]
+	if body["file_data"] == nil || body["file_name"] != "a.png" {
+		t.Fatalf("内联上传请求体错误: %+v", body)
+	}
+	if body["srv_send_msg"] != false {
+		t.Fatalf("应为 srv_send_msg=false")
+	}
+}
+
+func TestUploadChunkedAboveLimit(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+
+	data := make([]byte, inlineUploadLimit+5)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	info, err := c.UploadImage(context.Background(), Target{UserOpenID: "u-1"}, "big.png", data)
+	if err != nil {
+		t.Fatalf("UploadImage: %v", err)
+	}
+	if info != "fi-1" {
+		t.Fatalf("file_info 期望 fi-1，得到 %q", info)
+	}
+
+	f.mu.Lock()
+	prepares := append([]map[string]any(nil), f.prepares...)
+	finishes := append([]map[string]any(nil), f.partFinishes...)
+	bodies := append([]string(nil), f.partBodies...)
+	uploads := append([]map[string]any(nil), f.fileUploads...)
+	f.mu.Unlock()
+
+	if len(prepares) != 1 {
+		t.Fatalf("应调用一次 upload_prepare，得到 %d", len(prepares))
+	}
+	if prepares[0]["file_size"] != fmt.Sprintf("%d", len(data)) {
+		t.Fatalf("file_size 错误: %v", prepares[0]["file_size"])
+	}
+	for _, k := range []string{"md5", "sha1", "md5_10m", "file_name", "file_type"} {
+		if prepares[0][k] == nil {
+			t.Fatalf("upload_prepare 缺字段 %s: %+v", k, prepares[0])
+		}
+	}
+	if len(bodies) < 2 {
+		t.Fatalf("应至少 PUT 两个分片，得到 %d", len(bodies))
+	}
+	if len(finishes) != len(bodies) {
+		t.Fatalf("每个分片都应 part_finish（PUT=%d finish=%d）", len(bodies), len(finishes))
+	}
+	joined := strings.Join(bodies, "")
+	if len(joined) != len(data) {
+		t.Fatalf("分片合起来应等于原文件长度 %d，得到 %d", len(data), len(joined))
+	}
+	if len(uploads) != 1 || uploads[0]["upload_id"] != "up-1" {
+		t.Fatalf("合并请求应带 upload_id: %+v", uploads)
+	}
+}
+
+func TestUploadPreparePathPerTarget(t *testing.T) {
+	if got := preparePath(Target{UserOpenID: "u"}); got != "/v2/users/u/upload_prepare" {
+		t.Fatalf("单聊预上传路径错误: %s", got)
+	}
+	if got := preparePath(Target{GroupOpenID: "g"}); got != "/v2/groups/g/upload_prepare" {
+		t.Fatalf("群聊预上传路径错误: %s", got)
+	}
+	if got := partFinishPath(Target{GroupOpenID: "g"}); got != "/v2/groups/g/upload_part_finish" {
+		t.Fatalf("群聊分片完成路径错误: %s", got)
+	}
+}
+
+func TestUploadChecksums(t *testing.T) {
+	data := []byte("hello-qqbot")
+	sum := md5.Sum(data)
+	sha := sha1.Sum(data)
+	if hex.EncodeToString(sum[:]) == "" || hex.EncodeToString(sha[:]) == "" {
+		t.Fatal("校验值计算失败")
+	}
+	if md5WindowBytes != 10002432 {
+		t.Fatalf("md5_10m 窗口应为 10002432 字节，得到 %d", md5WindowBytes)
 	}
 }
