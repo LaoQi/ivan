@@ -28,7 +28,7 @@ type record struct {
 
 type EventLog struct {
 	dir     string
-	ch      chan agent.Event
+	ch      chan record
 	stop    chan struct{}
 	done    chan struct{}
 	closeMu sync.Mutex
@@ -46,7 +46,7 @@ func NewEventLog(dir string, buf int) (*EventLog, error) {
 	}
 	l := &EventLog{
 		dir:  dir,
-		ch:   make(chan agent.Event, buf),
+		ch:   make(chan record, buf),
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
@@ -55,6 +55,14 @@ func NewEventLog(dir string, buf int) (*EventLog, error) {
 }
 
 func (l *EventLog) Emit(e agent.Event) {
+	l.push(toRecord(e))
+}
+
+func (l *EventLog) Note(kind, text string) {
+	l.push(record{TS: time.Now().Format(time.RFC3339Nano), Kind: kind, Text: text})
+}
+
+func (l *EventLog) push(r record) {
 	l.closeMu.Lock()
 	if l.closed {
 		l.closeMu.Unlock()
@@ -62,7 +70,7 @@ func (l *EventLog) Emit(e agent.Event) {
 	}
 	l.closeMu.Unlock()
 	select {
-	case l.ch <- e:
+	case l.ch <- r:
 	default:
 		l.dropped.Add(1)
 	}
@@ -91,7 +99,7 @@ func (l *EventLog) loop() {
 		file *os.File
 		day  string
 	)
-	write := func(e agent.Event) {
+	write := func(r record) {
 		name := time.Now().Format("2006-01-02")
 		if file == nil || day != name {
 			if file != nil {
@@ -107,7 +115,7 @@ func (l *EventLog) loop() {
 			}
 			file, day = f, name
 		}
-		b, err := json.Marshal(toRecord(e))
+		b, err := json.Marshal(r)
 		if err != nil {
 			return
 		}
@@ -118,13 +126,13 @@ func (l *EventLog) loop() {
 	}
 	for {
 		select {
-		case e := <-l.ch:
-			write(e)
+		case r := <-l.ch:
+			write(r)
 		case <-l.stop:
 			for {
 				select {
-				case e := <-l.ch:
-					write(e)
+				case r := <-l.ch:
+					write(r)
 				default:
 					if file != nil {
 						file.Close()

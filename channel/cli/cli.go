@@ -30,6 +30,12 @@ const (
 	OpAck    = "ack"
 	OpPong   = "pong"
 
+	OpJobsList   = "jobs/list"
+	OpJobsRemove = "jobs/remove"
+	OpJobsRun    = "jobs/run"
+	OpPause      = "pause"
+	OpResume     = "resume"
+
 	maxFrame = 1 << 20
 )
 
@@ -44,7 +50,7 @@ type Frame struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-type Control func(op string) (any, error)
+type Control func(op, arg string) (any, error)
 
 type Socket struct {
 	path    string
@@ -220,18 +226,17 @@ func (s *Socket) handle(cn *conn, f Frame) {
 	switch f.Op {
 	case OpSend:
 		s.handleSend(cn, f)
-	case OpStatus:
-		raw, err := s.callControl(OpStatus)
-		if err != nil {
-			_ = cn.write(Frame{ID: f.ID, Op: OpError, Error: err.Error()})
-			return
-		}
-		_ = cn.write(Frame{ID: f.ID, Op: OpStatus, Data: raw})
+		return
 	case OpPing:
 		_ = cn.write(Frame{ID: f.ID, Op: OpPong})
-	default:
-		_ = cn.write(Frame{ID: f.ID, Op: OpError, Error: "未知 op: " + f.Op})
+		return
 	}
+	raw, err := s.callControl(f.Op, f.Text)
+	if err != nil {
+		_ = cn.write(Frame{ID: f.ID, Op: OpError, Error: err.Error()})
+		return
+	}
+	_ = cn.write(Frame{ID: f.ID, Op: f.Op, Data: raw})
 }
 
 func (s *Socket) handleSend(cn *conn, f Frame) {
@@ -274,11 +279,11 @@ func (s *Socket) handleSend(cn *conn, f Frame) {
 	_ = cn.write(Frame{ID: id, Op: OpAck})
 }
 
-func (s *Socket) callControl(op string) (json.RawMessage, error) {
+func (s *Socket) callControl(op, arg string) (json.RawMessage, error) {
 	if s.control == nil {
 		return nil, errors.New("不支持的控制指令: " + op)
 	}
-	v, err := s.control(op)
+	v, err := s.control(op, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -404,13 +409,13 @@ func Send(path, text, session string, wait time.Duration) (string, error) {
 	}
 }
 
-func Status(path string, timeout time.Duration) (json.RawMessage, error) {
+func Call(path, op, arg string, timeout time.Duration) (json.RawMessage, error) {
 	cl, err := Dial(path, timeout)
 	if err != nil {
 		return nil, err
 	}
 	defer cl.Close()
-	if err := cl.Do(Frame{ID: NewID(), Op: OpStatus}); err != nil {
+	if err := cl.Do(Frame{ID: NewID(), Op: op, Text: arg}); err != nil {
 		return nil, err
 	}
 	for i := 0; i < 4; i++ {
@@ -418,14 +423,18 @@ func Status(path string, timeout time.Duration) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		if f.Op == OpStatus {
+		if f.Op == op {
 			return f.Data, nil
 		}
 		if f.Op == OpError {
 			return nil, errors.New(f.Error)
 		}
 	}
-	return nil, errors.New("未收到 status 响应")
+	return nil, fmt.Errorf("未收到 %s 响应", op)
+}
+
+func Status(path string, timeout time.Duration) (json.RawMessage, error) {
+	return Call(path, OpStatus, "", timeout)
 }
 
 func Ping(path string, timeout time.Duration) error {

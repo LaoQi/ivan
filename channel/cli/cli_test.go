@@ -139,7 +139,10 @@ func TestNoWaitReturnsImmediately(t *testing.T) {
 }
 
 func TestStatusAndPing(t *testing.T) {
-	h := newHarness(t, func(op string) (any, error) {
+	h := newHarness(t, func(op, arg string) (any, error) {
+		if op == OpJobsRemove {
+			return map[string]any{"removed": arg}, nil
+		}
 		if op != OpStatus {
 			return nil, errors.New("不支持: " + op)
 		}
@@ -158,6 +161,17 @@ func TestStatusAndPing(t *testing.T) {
 	}
 	if err := Ping(h.path, 3*time.Second); err != nil {
 		t.Fatalf("Ping: %v", err)
+	}
+	raw, err = Call(h.path, OpJobsRemove, "job_1", 3*time.Second)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var removed map[string]any
+	if err := json.Unmarshal(raw, &removed); err != nil {
+		t.Fatalf("解析 jobs/remove: %v", err)
+	}
+	if removed["removed"] != "job_1" {
+		t.Fatalf("控制指令参数未透传: %v", removed)
 	}
 }
 
@@ -179,7 +193,7 @@ func TestBadFrames(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 	f, err = cl.Read(time.Second)
-	if err != nil || f.Op != OpError || !strings.Contains(f.Error, "未知 op") {
+	if err != nil || f.Op != OpError || !strings.Contains(f.Error, "不支持的控制指令") {
 		t.Fatalf("未知 op 应报错: %+v %v", f, err)
 	}
 	if _, err := cl.c.Write([]byte("{坏帧}\n")); err != nil {

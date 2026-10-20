@@ -45,6 +45,12 @@ func run(args []string) int {
 		return cmdSend(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
+	case "jobs":
+		return cmdJobs(args[1:])
+	case "pause":
+		return cmdPause(args[1:])
+	case "resume":
+		return cmdResume(args[1:])
 	}
 	usage()
 	return 1
@@ -92,6 +98,10 @@ func usage() {
   ivan send [--session=键] [--timeout=秒] [--no-wait] "指令"
                                        经 socket 投给 daemon 并等回复
   ivan status [--json]                 查询 daemon 状态（未运行时读磁盘状态）
+  ivan jobs [list] [--json]            列出计划任务（未运行时读作业库）
+  ivan jobs rm <id> | ivan jobs run <id>
+                                       取消/立即执行作业（需 daemon 运行）
+  ivan pause | ivan resume             暂停/恢复计划任务触发
   ivan config                          输出默认配置示例
   ivan -v                              版本
 `)

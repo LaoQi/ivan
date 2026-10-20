@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/LaoQi/ivan/daemon"
 	"github.com/LaoQi/ivan/data"
 	"github.com/LaoQi/ivan/runner"
+	"github.com/LaoQi/ivan/schedule"
+	sqlitestore "github.com/LaoQi/ivan/schedule/sqlite"
 )
 
 type flags struct {
@@ -219,7 +222,11 @@ type diskStatus struct {
 	LockStale  bool                         `json:"lock_stale,omitempty"`
 	StatePath  string                       `json:"state_path"`
 	StateError string                       `json:"state_error,omitempty"`
+	Paused     bool                         `json:"paused"`
 	Sessions   map[string]data.SessionState `json:"sessions"`
+	JobsDB     string                       `json:"jobs_db"`
+	Jobs       int                          `json:"jobs"`
+	JobsError  string                       `json:"jobs_error,omitempty"`
 }
 
 func cmdStatus(args []string) int {
@@ -270,6 +277,13 @@ func statusFromDisk(cfg *config.Config, jsonOut bool, cause error) int {
 		st.StateError = err.Error()
 	} else {
 		st.Sessions = state.Snapshot()
+		st.Paused = state.Paused()
+	}
+	st.JobsDB = cfg.JobsDBPath()
+	if jobs, err := loadJobsOffline(cfg); err != nil {
+		st.JobsError = err.Error()
+	} else {
+		st.Jobs = len(jobs)
 	}
 	if jsonOut {
 		b, err := json.MarshalIndent(st, "", "  ")
@@ -296,11 +310,223 @@ func statusFromDisk(cfg *config.Config, jsonOut bool, cause error) int {
 		fmt.Printf("state     读取失败: %s\n", st.StateError)
 		return 0
 	}
-	fmt.Printf("state     %s（%d 个会话映射）\n", st.StatePath, len(st.Sessions))
+	fmt.Printf("state     %s（%d 个会话映射，paused=%v）\n", st.StatePath, len(st.Sessions), st.Paused)
 	for _, key := range sortedKeys(st.Sessions) {
 		v := st.Sessions[key]
 		fmt.Printf("session   %s → %s（%s）\n", key, v.SessionID, v.UpdatedAt.Format("01-02 15:04:05"))
 	}
+	if st.JobsError != "" {
+		fmt.Printf("schedule  作业库不可用: %s\n", st.JobsError)
+	} else {
+		fmt.Printf("schedule  %s（%d 个作业，用 ivan jobs 查看）\n", st.JobsDB, st.Jobs)
+	}
+	return 0
+}
+
+func loadJobsOffline(cfg *config.Config) ([]schedule.Job, error) {
+	if !cfg.Schedule.Enabled {
+		return nil, fmt.Errorf("计划任务未启用")
+	}
+	path := cfg.JobsDBPath()
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	store, err := sqlitestore.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	return store.List()
+}
+
+func cmdJobs(args []string) int {
+	f, err := parseArgs(args, "json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	cfg, code := loadConfig()
+	if cfg == nil {
+		return code
+	}
+	sub := "list"
+	var arg string
+	if len(f.rest) > 0 {
+		sub = f.rest[0]
+	}
+	if len(f.rest) > 1 {
+		arg = f.rest[1]
+	}
+	if len(f.rest) > 2 {
+		usageJobs()
+		return 1
+	}
+	switch sub {
+	case "list", "ls":
+		return jobsList(cfg, f.bools["json"])
+	case "rm", "remove":
+		return jobsControl(cfg, cli.OpJobsRemove, arg, "已取消作业 "+arg)
+	case "run":
+		return jobsControl(cfg, cli.OpJobsRun, arg, "已触发作业 "+arg+"（结果见日志）")
+	default:
+		usageJobs()
+		return 1
+	}
+}
+
+func usageJobs() {
+	fmt.Fprintln(os.Stderr, "用法:\n  ivan jobs [list] [--json]\n  ivan jobs rm <id>\n  ivan jobs run <id>")
+}
+
+func jobsList(cfg *config.Config, jsonOut bool) int {
+	raw, err := cli.Call(cfg.SocketPath(), cli.OpJobsList, "", 5*time.Second)
+	jobs := []schedule.Job(nil)
+	if err == nil {
+		if err := json.Unmarshal(raw, &jobs); err != nil {
+			fmt.Fprintf(os.Stderr, "error: 解析作业列表失败: %v\n", err)
+			return 1
+		}
+	} else {
+		jobs, err = loadJobsOffline(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+	if jsonOut {
+		b, err := json.MarshalIndent(jobs, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(b))
+		return 0
+	}
+	if len(jobs) == 0 {
+		fmt.Println("没有计划任务。")
+		return 0
+	}
+	sortJobs(jobs)
+	fmt.Printf("%-26s %-12s %-10s %-16s %-16s %s\n", "id", "名称", "类型", "下次触发", "上次执行", "状态")
+	for _, j := range jobs {
+		fmt.Printf("%-26s %-12s %-10s %-16s %-16s %s\n",
+			j.ID, clip(labelOf(j), 12), kindOf(j), jobsTime(j.State.NextRunAtMS), jobsTime(j.State.LastRunAtMS), statusOf(j))
+	}
+	return 0
+}
+
+func jobsControl(cfg *config.Config, op, id, okText string) int {
+	if strings.TrimSpace(id) == "" {
+		usageJobs()
+		return 1
+	}
+	if _, err := cli.Call(cfg.SocketPath(), op, id, 10*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v（作业的取消/触发需要 daemon 运行）\n", err)
+		return 1
+	}
+	fmt.Println(okText)
+	return 0
+}
+
+func sortJobs(jobs []schedule.Job) {
+	sort.Slice(jobs, func(i, k int) bool {
+		a, b := jobs[i].State.NextRunAtMS, jobs[k].State.NextRunAtMS
+		if (a == 0) != (b == 0) {
+			return b == 0
+		}
+		if a != b {
+			return a < b
+		}
+		return jobs[i].ID < jobs[k].ID
+	})
+}
+
+func labelOf(j schedule.Job) string {
+	if name := strings.TrimSpace(j.Name); name != "" {
+		return name
+	}
+	return strings.Join(strings.Fields(j.Payload.Prompt), " ")
+}
+
+func kindOf(j schedule.Job) string {
+	if j.Schedule.Kind == schedule.KindAt {
+		return "一次性"
+	}
+	return "每 " + (time.Duration(j.Schedule.EveryMS) * time.Millisecond).String()
+}
+
+func jobsTime(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	return schedule.FromMS(ms).Local().Format("01-02 15:04:05")
+}
+
+func statusOf(j schedule.Job) string {
+	out := j.State.LastStatus
+	if out == "" {
+		out = "未跑过"
+	}
+	if !j.Enabled {
+		out += "（停用）"
+	}
+	if j.State.LastError != "" {
+		out += " 错误:" + clip(j.State.LastError, 40)
+	}
+	return out
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+func cmdPause(args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "用法: ivan pause")
+		return 1
+	}
+	return setPaused(true)
+}
+
+func cmdResume(args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "用法: ivan resume")
+		return 1
+	}
+	return setPaused(false)
+}
+
+func setPaused(paused bool) int {
+	cfg, code := loadConfig()
+	if cfg == nil {
+		return code
+	}
+	op := cli.OpResume
+	text := "已恢复（暂停开关 paused=false）"
+	if paused {
+		op = cli.OpPause
+		text = "已暂停（暂停开关 paused=true）"
+	}
+	if _, err := cli.Call(cfg.SocketPath(), op, "", 5*time.Second); err == nil {
+		fmt.Println(text)
+		return 0
+	}
+	state, err := data.LoadState(cfg.StatePath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := state.SetPaused(paused); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Println(text + "（daemon 未运行，已写入状态文件）")
 	return 0
 }
 
@@ -346,6 +572,21 @@ func printStatus(st daemon.Status) {
 		}
 		if st.QQ.LastError != "" {
 			line += fmt.Sprintf(" last_error=%q", st.QQ.LastError)
+		}
+		fmt.Println(line)
+	}
+	if st.ScheduleError != "" {
+		fmt.Printf("schedule  不可用: %s\n", st.ScheduleError)
+	}
+	if st.Schedule != nil {
+		sch := st.Schedule
+		line := fmt.Sprintf("schedule  jobs=%d enabled=%d running=%d paused=%v triggers=%d failures=%d missed=%d tokens_today=%d",
+			sch.Jobs, sch.Enabled, sch.Running, sch.Paused, sch.Triggers, sch.Failures, sch.Missed, sch.TokensToday)
+		if !sch.NextRunAt.IsZero() {
+			line += " next=" + sch.NextRunAt.Local().Format("01-02 15:04:05")
+		}
+		if sch.LastError != "" {
+			line += fmt.Sprintf(" last_error=%q", sch.LastError)
 		}
 		fmt.Println(line)
 	}

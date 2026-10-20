@@ -197,10 +197,10 @@ func TestControlUnknownOp(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer d.Release()
-	if _, err := d.Control("jobs"); err == nil {
+	if _, err := d.Control("jobs", ""); err == nil {
 		t.Fatal("未实现的 op 应报错")
 	}
-	if st, err := d.Control(cli.OpStatus); err != nil {
+	if st, err := d.Control(cli.OpStatus, ""); err != nil {
 		t.Fatalf("status: %v", err)
 	} else if _, ok := st.(Status); !ok {
 		t.Fatalf("status 返回类型异常: %T", st)

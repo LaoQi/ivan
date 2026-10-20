@@ -52,6 +52,19 @@ daemon:
   # 出站单条发送超时（秒，含重试窗口）
   send_timeout_seconds: 60
 
+# 计划任务（见 docs/schedule.md）
+schedule:
+  # 是否启用调度器（关掉后 schedule 工具不可用、启动不打开作业库）
+  enabled: true
+  # 作业库（sqlite，相对路径落在 data_dir 下）；损坏时保留原文件并显式报错
+  jobs_db: jobs.db
+  # 停机期间到期的作业：run（一次性提醒补跑，默认）/ skip（放弃）
+  missed_policy: run
+  # 单次作业执行超时（秒），超时取消该回合并记失败
+  job_timeout_seconds: 900
+  # 作业回合的每日 token 预算（0 = 不限；当天用尽后跳过触发并记事件）
+  max_tokens_per_day: 0
+
 channels:
   # 本地 cli 通道（unix socket，ivan send/status 用它）
   cli:

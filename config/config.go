@@ -15,19 +15,21 @@ import (
 var Version = "dev"
 
 const (
-	DefaultSessionMode     = "global"
-	DataDirSuffix          = ".local/share/ivan"
-	ConfigPathSuffix       = ".config/ivan/config.yaml"
-	TanyaConfigPathSuffix  = ".config/tanya/config.yaml"
-	UserAgentURL           = "https://github.com/LaoQi/ivan"
-	EnvPrefix              = "IVAN_"
-	DefaultSocket          = "ivan.sock"
-	DefaultBusBuffer       = 64
-	DefaultMaxConcurrent   = 2
-	DefaultShutdownSeconds = 30
-	DefaultSendSeconds     = 60
-	DefaultMaxAgents       = 8
-	DefaultIdleMinutes     = 30
+	DefaultSessionMode       = "global"
+	DataDirSuffix            = ".local/share/ivan"
+	ConfigPathSuffix         = ".config/ivan/config.yaml"
+	TanyaConfigPathSuffix    = ".config/tanya/config.yaml"
+	UserAgentURL             = "https://github.com/LaoQi/ivan"
+	EnvPrefix                = "IVAN_"
+	DefaultSocket            = "ivan.sock"
+	DefaultBusBuffer         = 64
+	DefaultMaxConcurrent     = 2
+	DefaultShutdownSeconds   = 30
+	DefaultSendSeconds       = 60
+	DefaultMaxAgents         = 8
+	DefaultIdleMinutes       = 30
+	DefaultJobsDB            = "jobs.db"
+	DefaultJobTimeoutSeconds = 900
 )
 
 type RunnerConfig struct {
@@ -71,11 +73,20 @@ type ChannelsConfig struct {
 	QQ  QQConfig  `yaml:"qq"`
 }
 
+type ScheduleConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	JobsDB            string `yaml:"jobs_db"`
+	MissedPolicy      string `yaml:"missed_policy"`
+	JobTimeoutSeconds int    `yaml:"job_timeout_seconds"`
+	MaxTokensPerDay   int    `yaml:"max_tokens_per_day"`
+}
+
 type Config struct {
 	agent.Config  `yaml:",inline"`
 	Runner        RunnerConfig   `yaml:"runner"`
 	Daemon        DaemonConfig   `yaml:"daemon"`
 	Channels      ChannelsConfig `yaml:"channels"`
+	Schedule      ScheduleConfig `yaml:"schedule"`
 	ImageMaxBytes int            `yaml:"image_max_bytes"`
 	ImageResize   bool           `yaml:"image_resize"`
 	Path          string         `yaml:"-"`
@@ -119,6 +130,12 @@ func Default() *Config {
 		Channels: ChannelsConfig{
 			CLI: CLIConfig{Enabled: true},
 			QQ:  QQConfig{MaxMessageLen: 1200, ReconnectMaxSec: 60},
+		},
+		Schedule: ScheduleConfig{
+			Enabled:           true,
+			JobsDB:            DefaultJobsDB,
+			MissedPolicy:      "run",
+			JobTimeoutSeconds: DefaultJobTimeoutSeconds,
 		},
 		ImageMaxBytes: agent.DefaultImageMaxBytes,
 		ImageResize:   true,
@@ -209,6 +226,15 @@ func (c *Config) normalize() {
 	if c.Channels.QQ.ReconnectMaxSec <= 0 {
 		c.Channels.QQ.ReconnectMaxSec = 60
 	}
+	if strings.TrimSpace(c.Schedule.JobsDB) == "" {
+		c.Schedule.JobsDB = DefaultJobsDB
+	}
+	if strings.TrimSpace(c.Schedule.MissedPolicy) == "" {
+		c.Schedule.MissedPolicy = "run"
+	}
+	if c.Schedule.JobTimeoutSeconds <= 0 {
+		c.Schedule.JobTimeoutSeconds = DefaultJobTimeoutSeconds
+	}
 }
 
 func (c *Config) SocketPath() string {
@@ -253,6 +279,21 @@ func (c *Config) QQEnabled() bool {
 }
 
 func (c *Config) MediaDir() string { return filepath.Join(c.DataDir, "media") }
+
+func (c *Config) JobsDBPath() string {
+	p := strings.TrimSpace(c.Schedule.JobsDB)
+	if p == "" {
+		p = DefaultJobsDB
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(c.DataDir, p)
+}
+
+func (c *Config) JobTimeout() time.Duration {
+	return time.Duration(c.Schedule.JobTimeoutSeconds) * time.Second
+}
 
 func expandHome(p string) string {
 	p = strings.TrimSpace(p)

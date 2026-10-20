@@ -21,6 +21,7 @@ type SessionState struct {
 type stateDoc struct {
 	Version   int                     `json:"version"`
 	UpdatedAt time.Time               `json:"updated_at,omitempty"`
+	Paused    bool                    `json:"paused,omitempty"`
 	Sessions  map[string]SessionState `json:"sessions"`
 }
 
@@ -83,6 +84,22 @@ func (s *State) Delete(key string) error {
 		return nil
 	}
 	delete(s.doc.Sessions, key)
+	return s.flushLocked()
+}
+
+func (s *State) Paused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.doc.Paused
+}
+
+func (s *State) SetPaused(v bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.doc.Paused == v {
+		return nil
+	}
+	s.doc.Paused = v
 	return s.flushLocked()
 }
 
