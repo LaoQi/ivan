@@ -51,6 +51,7 @@ type Runner struct {
 	handoffs  atomic.Uint64
 	continued atomic.Uint64
 	hinted    atomic.Uint64
+	forced    atomic.Uint64
 	cancelled atomic.Uint64
 	dropped   atomic.Uint64
 	inFlight  atomic.Int64
@@ -81,6 +82,9 @@ type Status struct {
 	Continued       uint64        `json:"continued"`
 	DroppedOutbound uint64        `json:"dropped_outbound"`
 	Hinted          uint64        `json:"hinted"`
+	Forced          uint64        `json:"forced"`
+	HandoffHint     int           `json:"handoff_hint_tokens"`
+	HandoffForce    int           `json:"handoff_force_tokens"`
 	TokensToday     int           `json:"tokens_today"`
 	MaxTokensPerDay int           `json:"max_tokens_per_day"`
 	Paused          bool          `json:"paused"`
@@ -376,6 +380,9 @@ func (r *Runner) Status() Status {
 		Continued:       r.continued.Load(),
 		DroppedOutbound: r.dropped.Load(),
 		Hinted:          r.hinted.Load(),
+		Forced:          r.forced.Load(),
+		HandoffHint:     r.cfg.Runner.HandoffHintTokens,
+		HandoffForce:    r.cfg.Runner.HandoffForceTokens,
 		TokensToday:     r.TokensToday(),
 		MaxTokensPerDay: r.cfg.Runner.MaxTokensPerDay,
 		Paused:          r.paused(),
@@ -477,7 +484,7 @@ func (t *task) run(ctx context.Context) error {
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 		}
 	}()
-	hinted := false
+	hinted, forced := false, false
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
 		if err != nil {
@@ -515,7 +522,15 @@ func (t *task) run(ctx context.Context) error {
 			t.r.continued.Add(1)
 			continue
 		}
-		if hinted || !t.pressure() {
+		level := t.pressure()
+		if level == pressureNone {
+			return nil
+		}
+		if level == pressureHint && hinted {
+			return nil
+		}
+		if level == pressureForce && forced {
+			t.forcedStop()
 			return nil
 		}
 		if t.r.paused() {
@@ -526,19 +541,54 @@ func (t *task) run(ctx context.Context) error {
 		if t.stopForBudget(turn) {
 			return nil
 		}
-		hinted = true
-		if err := ag.AppendNotice(handoffHint); err != nil {
+		notice := ""
+		kind := ""
+		switch level {
+		case pressureHint:
+			hinted = true
+			t.r.hinted.Add(1)
+			notice = fmt.Sprintf(handoffHintNotice, t.contextTokens(), t.r.cfg.Runner.HandoffHintTokens)
+			kind = "handoff_hint"
+		case pressureForce:
+			forced = true
+			t.r.forced.Add(1)
+			notice = fmt.Sprintf(handoffForceNotice, t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens)
+			kind = "handoff_force"
+		}
+		if err := ag.AppendNotice(notice); err != nil {
 			t.r.notice("注入交接提示失败 key=%s: %v", t.key, err)
 			return nil
 		}
-		t.r.hinted.Add(1)
-		hint := fmt.Sprintf("上下文 %d tokens 已达阈值 %.0f%%，提示模型交接", t.contextTokens(), thresholdRatio(t.r.cfg)*100)
-		t.r.human(chlog.Event{Kind: "handoff_hint", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: hint})
-		t.r.note("handoff_hint", t.key+" "+hint)
+		text := fmt.Sprintf("上下文 %d tokens 达阈值 %d，已%s交接", t.contextTokens(), t.levelTokens(level), map[bool]string{true: "强制", false: "建议"}[level == pressureForce])
+		t.r.human(chlog.Event{Kind: kind, Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: text})
+		t.r.note(kind, t.key+" "+text)
 	}
 }
 
-const handoffHint = "系统提示：本会话上下文已接近窗口上限，请立即调用 next_session 交接进度（summary 写清已完成内容、关键结论与下一步），然后结束本回合。"
+const handoffHintNotice = "系统提示：本会话上下文已到 %d tokens（建议交接阈值 %d）。建议在本阶段收尾后调用 next_session 交接进度（summary 写清已完成内容、关键结论与下一步）；若目标马上就能完成，可先把当前步骤做完再交接。"
+
+const handoffForceNotice = "系统提示：本会话上下文已到 %d tokens，达到强制交接阈值 %d。必须立即调用 next_session 完成交接，本回合不要再做其他工作，也不要继续读文件或跑命令。"
+
+type handoffPressure int
+
+const (
+	pressureNone handoffPressure = iota
+	pressureHint
+	pressureForce
+)
+
+func (t *task) levelTokens(level handoffPressure) int {
+	if level == pressureForce {
+		return t.r.cfg.Runner.HandoffForceTokens
+	}
+	return t.r.cfg.Runner.HandoffHintTokens
+}
+
+func (t *task) forcedStop() {
+	text := fmt.Sprintf("上下文 %d tokens 达强制交接阈值 %d，模型仍未交接，本任务已停止（下次消息继续）", t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens)
+	t.r.human(chlog.Event{Kind: "handoff_forced", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: text})
+	t.r.note("handoff_forced", t.key+" "+text)
+}
 
 func (t *task) stopForBudget(turn int) bool {
 	if max := t.r.cfg.Runner.MaxTurnsPerTask; max > 0 && turn+1 >= max {
@@ -561,19 +611,7 @@ func (t *task) blocked(text string) {
 	t.r.note("budget", t.key+" "+text)
 }
 
-func thresholdRatio(cfg *config.Config) float64 {
-	ratio := cfg.Runner.HandoffThreshold
-	if ratio <= 0 || ratio > 1 {
-		return 0.7
-	}
-	return ratio
-}
-
-func (t *task) pressure() bool {
-	window := t.r.cfg.Runner.ContextWindowTokens
-	if window <= 0 {
-		return false
-	}
+func (t *task) pressure() handoffPressure {
 	used := t.contextTokens()
 	if used <= 0 {
 		if ag := t.inst.ag; ag != nil {
@@ -586,9 +624,15 @@ func (t *task) pressure() bool {
 		}
 	}
 	if used <= 0 {
-		return false
+		return pressureNone
 	}
-	return float64(used) >= float64(window)*thresholdRatio(t.r.cfg)
+	if force := t.r.cfg.Runner.HandoffForceTokens; force > 0 && used >= force {
+		return pressureForce
+	}
+	if hint := t.r.cfg.Runner.HandoffHintTokens; hint > 0 && used >= hint {
+		return pressureHint
+	}
+	return pressureNone
 }
 
 func (t *task) sink(e agent.Event) {

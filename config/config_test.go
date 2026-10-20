@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.SessionMode != DefaultSessionMode {
 		t.Fatalf("SessionMode=%s", cfg.SessionMode)
 	}
-	if cfg.Runner.ContextWindowTokens <= 0 || cfg.Runner.HandoffThreshold <= 0 {
+	if cfg.Runner.HandoffHintTokens != DefaultHandoffHintTokens || cfg.Runner.HandoffForceTokens != DefaultHandoffForceTokens {
 		t.Fatalf("runner 默认值异常: %+v", cfg.Runner)
 	}
 	if cfg.Runner.AutoContinue {
@@ -29,7 +30,7 @@ func TestDefaultValues(t *testing.T) {
 func TestLoadFileAndEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	body := "base_url: http://example.invalid/v1\napi_key: file-key\nmodel: file-model\ndata_dir: " + dir + "\nrunner:\n  context_window_tokens: 32000\n  auto_continue: true\n"
+	body := "base_url: http://example.invalid/v1\napi_key: file-key\nmodel: file-model\ndata_dir: " + dir + "\nrunner:\n  handoff_hint_tokens: 32000\n  auto_continue: true\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestLoadFileAndEnv(t *testing.T) {
 	if cfg.APIKey != "file-key" || cfg.Model != "file-model" {
 		t.Fatalf("文件值未生效: %+v", cfg)
 	}
-	if cfg.Runner.ContextWindowTokens != 32000 || !cfg.Runner.AutoContinue {
+	if cfg.Runner.HandoffHintTokens != 32000 || !cfg.Runner.AutoContinue {
 		t.Fatalf("runner 段未生效: %+v", cfg.Runner)
 	}
 	if cfg.Config.ConfigPath != path || cfg.Path != path {
@@ -171,5 +172,17 @@ func TestExpandHomeDataDir(t *testing.T) {
 	}
 	if want := filepath.Join(home, ".local/share/ivan-test", DefaultSocket); cfg.SocketPath() != want {
 		t.Fatalf("socket 未跟随 data_dir: %s", cfg.SocketPath())
+	}
+}
+
+func TestHandoffTierValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "data_dir: " + dir + "\nrunner:\n  handoff_hint_tokens: 300000\n  handoff_force_tokens: 200000\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "handoff_force_tokens") {
+		t.Fatalf("强制档小于建议档应报错，得到 %v", err)
 	}
 }

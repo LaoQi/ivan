@@ -15,32 +15,34 @@ import (
 var Version = "dev"
 
 const (
-	DefaultSessionMode       = "global"
-	DataDirSuffix            = ".local/share/ivan"
-	ConfigPathSuffix         = ".config/ivan/config.yaml"
-	TanyaConfigPathSuffix    = ".config/tanya/config.yaml"
-	UserAgentURL             = "https://github.com/LaoQi/ivan"
-	EnvPrefix                = "IVAN_"
-	DefaultSocket            = "ivan.sock"
-	DefaultBusBuffer         = 64
-	DefaultMaxConcurrent     = 2
-	DefaultShutdownSeconds   = 30
-	DefaultSendSeconds       = 60
-	DefaultMaxAgents         = 8
-	DefaultIdleMinutes       = 30
-	DefaultJobsDB            = "jobs.db"
-	DefaultJobTimeoutSeconds = 900
+	DefaultSessionMode        = "global"
+	DataDirSuffix             = ".local/share/ivan"
+	ConfigPathSuffix          = ".config/ivan/config.yaml"
+	TanyaConfigPathSuffix     = ".config/tanya/config.yaml"
+	UserAgentURL              = "https://github.com/LaoQi/ivan"
+	EnvPrefix                 = "IVAN_"
+	DefaultSocket             = "ivan.sock"
+	DefaultBusBuffer          = 64
+	DefaultMaxConcurrent      = 2
+	DefaultShutdownSeconds    = 30
+	DefaultSendSeconds        = 60
+	DefaultMaxAgents          = 8
+	DefaultIdleMinutes        = 30
+	DefaultJobsDB             = "jobs.db"
+	DefaultJobTimeoutSeconds  = 900
+	DefaultHandoffHintTokens  = 180000
+	DefaultHandoffForceTokens = 256000
 )
 
 type RunnerConfig struct {
-	ContextWindowTokens int     `yaml:"context_window_tokens"`
-	HandoffThreshold    float64 `yaml:"handoff_threshold"`
-	AutoContinue        bool    `yaml:"auto_continue"`
-	MaxTurnsPerTask     int     `yaml:"max_turns_per_task"`
-	MaxTokensPerTask    int     `yaml:"max_tokens_per_task"`
-	MaxTokensPerDay     int     `yaml:"max_tokens_per_day"`
-	MaxAgents           int     `yaml:"max_agents"`
-	IdleTimeoutMinutes  int     `yaml:"idle_timeout_minutes"`
+	HandoffHintTokens  int  `yaml:"handoff_hint_tokens"`
+	HandoffForceTokens int  `yaml:"handoff_force_tokens"`
+	AutoContinue       bool `yaml:"auto_continue"`
+	MaxTurnsPerTask    int  `yaml:"max_turns_per_task"`
+	MaxTokensPerTask   int  `yaml:"max_tokens_per_task"`
+	MaxTokensPerDay    int  `yaml:"max_tokens_per_day"`
+	MaxAgents          int  `yaml:"max_agents"`
+	IdleTimeoutMinutes int  `yaml:"idle_timeout_minutes"`
 }
 
 type DaemonConfig struct {
@@ -113,12 +115,12 @@ func Default() *Config {
 			ArchiveKeep:      agent.DefaultArchiveKeep,
 		},
 		Runner: RunnerConfig{
-			ContextWindowTokens: 128000,
-			HandoffThreshold:    0.7,
-			AutoContinue:        false,
-			MaxTurnsPerTask:     8,
-			MaxAgents:           DefaultMaxAgents,
-			IdleTimeoutMinutes:  DefaultIdleMinutes,
+			HandoffHintTokens:  DefaultHandoffHintTokens,
+			HandoffForceTokens: DefaultHandoffForceTokens,
+			AutoContinue:       false,
+			MaxTurnsPerTask:    8,
+			MaxAgents:          DefaultMaxAgents,
+			IdleTimeoutMinutes: DefaultIdleMinutes,
 		},
 		Daemon: DaemonConfig{
 			Socket:                 DefaultSocket,
@@ -172,6 +174,10 @@ func Load(path string) (*Config, error) {
 		borrowTanya(cfg)
 	}
 	cfg.normalize()
+	if cfg.Runner.HandoffForceTokens <= cfg.Runner.HandoffHintTokens {
+		return nil, fmt.Errorf("handoff_force_tokens(%d) 必须大于 handoff_hint_tokens(%d)",
+			cfg.Runner.HandoffForceTokens, cfg.Runner.HandoffHintTokens)
+	}
 	return cfg, nil
 }
 
@@ -210,6 +216,12 @@ func (c *Config) normalize() {
 	}
 	if c.Daemon.SendTimeoutSeconds <= 0 {
 		c.Daemon.SendTimeoutSeconds = DefaultSendSeconds
+	}
+	if c.Runner.HandoffHintTokens <= 0 {
+		c.Runner.HandoffHintTokens = DefaultHandoffHintTokens
+	}
+	if c.Runner.HandoffForceTokens <= 0 {
+		c.Runner.HandoffForceTokens = DefaultHandoffForceTokens
 	}
 	if c.Runner.MaxAgents <= 0 {
 		c.Runner.MaxAgents = DefaultMaxAgents

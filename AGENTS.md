@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P4 已完成**（上下文阈值自动交接、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`）。P0–P3 见前：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。下一步 P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10。
+> 状态：**P4 已完成**（上下文两档阈值自动交接（建议 180K / 强制 256K）、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`）。P0–P3 见前：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。下一步 P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10。
 
 ## 设计约束
 
@@ -18,6 +18,7 @@
 - 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；危险命令最小黑名单拦截；AppSecret 不进日志/事件/错误信息
+- 交接阈值两档（绝对值，`handoff_hint_tokens` 180K / `handoff_force_tokens` 256K）：建议档只提示、强制档要求立即交接且不交接就停（不再发请求）；两档每任务各触发一次，且都受暂停/预算闸门
 - 预算只在一处统计：`runner`（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日用量落 `state.json` 跨进程累计），调度器用注入的 `Budget` 回调复用；不要再加第二个预算口径
 - 暂停语义：`paused` 只挡**无人值守路径**（定时作业触发、交接后自动续跑、阈值交接提示），用户主动消息照常处理
 - 记忆与目标**按需读取**：路径写进 system prompt（静态、保缓存），模型自己 `run_shell` 读/追加，不做每轮注入、不建专用工具

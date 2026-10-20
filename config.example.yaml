@@ -24,10 +24,10 @@ session_mode: global
 
 # 运行器与自主推进（见 docs/sessions.md）
 runner:
-  # 模型上下文窗口（tokens），用于自动交接阈值判断
-  context_window_tokens: 128000
-  # 交接阈值：本地估算上下文 / 窗口 超过该比例时提示模型交接
-  handoff_threshold: 0.7
+  # 一级：建议交接阈值（tokens）。上下文达到后提示模型"收尾后交接"，模型可自行决定先做完当前步骤
+  handoff_hint_tokens: 180000
+  # 二级：强制交接阈值（tokens）。达到后要求模型立即交接，本回合不再做别的；模型仍不交接则停止本任务
+  handoff_force_tokens: 256000
   # 自动续跑（默认关）：开启后单条消息触发的任务可在交接后自行继续；
   # 受 max_turns_per_task / max_tokens_per_task / max_tokens_per_day 与 ivan pause 约束
   auto_continue: false
