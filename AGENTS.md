@@ -81,4 +81,4 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . pause       # 暂停定时触发
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 
-依赖：`github.com/LaoQi/tanya` 经 `go.work`（`use ./ ../tanya`）与 `go.mod` 的 `replace ../tanya` 本地联调。
+依赖：`github.com/LaoQi/tanya` 经 `go.work`（`use ./ ../tanya`）与 `go.mod` 的 `replace ../tanya` 本地联调；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。
