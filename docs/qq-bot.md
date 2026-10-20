@@ -1,7 +1,7 @@
 # QQ 官方机器人通道
 
 > 状态：规划。接入 QQ 开放平台**官方机器人**（不走 OneBot）。协议自实现（D3）。
-> 标 **[核对]** 的细节以官方文档为准，实装时逐条验证并回填本文。
+> 状态：**协议事实已核对**（官方文档抓取 + 真机凭证实测，2026-10-20），结论见 §10；凭证来源见 §12。
 
 ## 1 范围
 
@@ -23,15 +23,19 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
 
 ## 3 鉴权
 
-- `POST https://bots.qq.com/app/getAppAccessToken`，body `{appId, clientSecret}` → `{access_token, expires_in}`。**[核对]** 域名与字段名
-- 之后的 REST 调用带 `Authorization: QQBot <access_token>`。**[核对]** 前缀格式，沙箱环境是否同一套
+- `POST https://api.bot.qq.com/app/getAppAccessToken`（官方文档口径），body `{appId, clientSecret}` → `{access_token, expires_in}`。
+  **实测同时**：旧域名 `https://bots.qq.com/app/getAppAccessToken` 仍可用（botgo 用的就是它，返回相同体）。
+  `expires_in` 实测是**字符串**（如 `"6468"`），文档写 number → 解析用兼容类型。
+- 之后的 REST 调用带 `Authorization: QQBot <access_token>`（**实测通过**：`/users/@me`、`/gateway`、`/gateway/bot` 均 200）。
+  `X-Union-Appid` **非必需**（带与不带都 200）。沙箱环境已不可用，不再考虑。
 - token 后台自动刷新：按 `expires_in` 提前（如 80%）换新；刷新失败按指数退避重试并记日志，**不阻塞消息收发**（旧 token 到点前的请求仍可发）。
 - AppSecret 只从配置文件读（权限 0600），不进日志、不进事件、不出现在错误信息里。
 
 ## 4 网关与 WebSocket 生命周期
 
-- `GET /gateway` → `{url}`（wss）。API base 生产 `https://api.sgroup.qq.com`、沙箱 `https://sandbox.api.sgroup.qq.com`。**[核对]**
-- opcode：`0` dispatch / `1` heartbeat / `2` identify / `6` resume / `7` reconnect / `9` invalid session / `10` hello / `11` heartbeat ack。**[核对]**
+- `GET /gateway` → `{url}`（实测 `wss://api.sgroup.qq.com/websocket`）；`GET /gateway/bot` → `{url, shards, session_start_limit{total,remaining,reset_after,max_concurrency}}`
+  （实测该 appid `shards:1`、`max_concurrency:1`、`remaining:1500`/天）。API base 生产 `https://api.sgroup.qq.com`；**沙箱已下线**，只做生产。
+- opcode（已核对）：`0` dispatch / `1` heartbeat / `2` identify / `6` resume / `7` reconnect / `9` invalid session / `10` hello / `11` heartbeat ack / `12` http 回调 ack / `13` 回调地址验证。
 - 流程：连上 → `op10 hello{heartbeat_interval}` → `op2 identify{token, intents, shard:[0,1], properties}` → `op0 READY`（记 `session_id` 与 `s`）→ 定时 `op1`（带最新 `s`）→ `op11` ack。
 - 心跳：按 `heartbeat_interval` 的 80% 发；连续未收到 ack 判定连接僵死 → 主动重连。
 - 重连策略：
@@ -43,7 +47,7 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
 
 ## 5 订阅事件（intents）
 
-- 订阅位：群与 C2C 事件 `1<<25`（`GROUP_AND_C2C_EVENT`）。**[核对]**
+- 订阅位（已核对）：群与 C2C 事件 `1<<25`（`GROUP_AND_C2C_EVENT`）= **33554432**；`C2C_MESSAGE_CREATE` 与 `GROUP_AT_MESSAGE_CREATE` 同属该位。
 - 首期处理：
   - `C2C_MESSAGE_CREATE`：单聊消息，`d.author.user_openid`、`d.content`、`d.id`（被动回复用）
   - `GROUP_AT_MESSAGE_CREATE`：群内 @ 机器人，`d.group_openid`、`d.author.member_openid`、`d.content`、`d.id`
@@ -52,8 +56,9 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
 
 ## 6 发送
 
-- 单聊：`POST /v2/users/{openid}/messages`；群聊：`POST /v2/groups/{group_openid}/messages`。**[核对]**
-- 文本：`{content, msg_type: 0, msg_id?, msg_seq?}`；`msg_type`：`0` 文本 / `2` markdown / `7` 富媒体。
+- 单聊：`POST /v2/users/{user_openid}/messages`（100 QPS）；群聊：`POST /v2/groups/{group_openid}/messages`（已核对）。
+- 文本：`{content, msg_type: 0, msg_id?, msg_seq?}`；`msg_type`（已核对）：`0` 文本（`content`）/ `2` markdown（`markdown.content`，此时 `content` 必须为空）/ `6` 输入中（`input_notify`）/ `7` 富媒体（`media.file_info`）。
+- `msg_seq` 不填默认 `1`；`msg_id` 文档写「5 分钟有效」（与 §11 实测 60 分钟冲突 → 以实测为准，窗口内以服务端返回 `40034005 回复消息msg_id已过期` 为终止条件）。
 - **被动回复**（官方文档实测，2026-10-21 版）：
   - 单聊：有效期 **60 分钟**，每条消息最多回复 **4 次**
   - 群聊：有效期 **5 分钟**，最多 **5 次**
@@ -63,7 +68,8 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
   - 互动召回（`is_wakeup: true`）：用户对话后 30 天内仅 4 个周期各 1 条，**不作为常规通知手段**。
 - **功能前提**：官方要求机器人保持 WebSocket 在线才能发送消息 → 重连健壮性是功能前提而非体验优化。
 - 图片：先上传 `/v2/users/{openid}/files`（单聊）或群对应接口（**单聊与群聊上传接口不互通**），`file_type: 1`，得到 `file_info`（`file_uuid`/`ttl`），再以 `msg_type: 7` + `media.file_info` 发送。官方推荐**分片上传**（无需公网 CDN），整文件上传为备选；`ttl` 过期需重传，适配器缓存 `file_uuid` 并处理失效重传。
-- 消息长度：按官方上限切分（[核对]），默认保守 1200 字符，走通用切分器（见 `docs/channels.md` §6）。
+- 消息长度：官方未给硬上限（picoclaw 配置用 2000），本期按 `max_message_len`（默认 1200）保守切分，走通用切分器（见 `docs/channels.md` §6）。
+- 图片上传（已核对）：`POST /v2/users/{user_openid}/files`（50 QPS）与 `/v2/groups/{group_openid}/files`；`file_type: 1` 图片（png/jpg）；三种传法——`file_data` 二进制 ≤5MB、`url`（http 开头，平台转存）、分片（`upload_prepare` → `upload_part` → `upload_part_finish`）；`srv_send_msg: false` 只返回 `file_info`，再以 `msg_type: 7` + `media.file_info` 发。
 - 限流：发送失败带平台错误码时，区分「限流」「权限不足」「参数错误」「凭证失效」，分别退避重试 / 直接失败 / 记录待查。
 
 ## 7 入站处理
@@ -92,21 +98,24 @@ channels:
 
 1. **协议单测**：token 刷新（含提前刷新与失败退避）、identify/resume 帧构造、心跳定时、opcode 分发、错误码分类、`msg_seq` 递增与窗口过期、去重 TTL。
 2. **假网关集成测试**：本地起 httptest 网关服务（模拟 `/gateway` 与 ws），跑真实 `qqbot.Client`：覆盖正常收发、断线 resume、`op9` 重连、心跳超时、限流退避。
-3. **沙箱真机**：`q.qq.com` 沙箱机器人 + 测试账号，验证真实收发、图片上传、群 @（凭证实施阶段提供）。
+3. **真机验证**：生产凭证（§12）+ 本人 QQ 账号，验证单聊收发、群 @、图片上传（**沙箱环境已下线**，不做沙箱）。
 4. 不引入 `tencent-connect/botgo` 作为参照实现（D3），协议行为以官方文档 + 真机抓包为准。
 
-## 10 待实装核对清单
+## 10 核对结论（2026-10-20 完成）
 
-- [ ] token 端点域名/字段名/`Authorization` 前缀格式
-- [ ] 生产与沙箱 API base 域名
-- [ ] intents 位定义与是否需要额外 flag
-- [ ] `msg_id`/`msg_seq` 规则与被动回复条数/时限
-- [ ] 文本长度上限与图片发送的消息体形态（`msg_type` 取值）
-- [ ] 图片上传接口路径、`file_type` 枚举、`ttl` 行为
-- [ ] 主动消息的权限与配额
-- [ ] 错误码表（限流/权限/参数/凭证）
+真机凭证实测（app_id 见 §12）+ 官方文档抓取（`bot.q.qq.com/wiki/develop/api-v2/`）逐条核对，全部完成：
 
-## 11 官方规则速查（实测 2026-10-10 抓取）
+- [x] token 端点：`https://api.bot.qq.com/app/getAppAccessToken`（旧 `bots.qq.com` 亦可用）；字段 `appId`/`clientSecret` → `access_token`/`expires_in`（**字符串**）
+- [x] `Authorization: QQBot <access_token>` 前缀正确；`X-Union-Appid` 非必需
+- [x] 生产 base `https://api.sgroup.qq.com`；**沙箱环境已下线**（本机器人只在生产跑）
+- [x] intents `1<<25 = 33554432`（`GROUP_AND_C2C_EVENT`），`shard: [0,1]`
+- [x] 被动回复：以服务端错误码 `40034005`（msg_id 已过期）判定窗口结束；条数以失败即停为准
+- [x] `msg_type`：`0` 文本 / `2` markdown / `6` 输入中 / `7` 富媒体；文本上限官方未给，取配置
+- [x] 图片上传：`/v2/users/{openid}/files`、`/v2/groups/{group_openid}/files`，`file_type: 1`，`srv_send_msg: false`，二进制 ≤5MB / url / 分片
+- [x] 错误码：body 用 `err_code`（非 `code`）+ `message` + `trace_id`；HTTP 429 = 限流；401 认证失败；常见业务码 `11251/11261` appid 错、`11253` 无权限、`11254` 接口封禁
+- [x] 频控：消息接口 100 QPS（单聊/群聊一致），文件接口 50 QPS；网关会话启动 `1500` 次/天（`max_concurrency: 1`）
+
+## 11 官方规则速查（文档抓取 2026-10-10，2026-10-20 复核）
 
 | 项 | 单聊 | 群聊 |
 |---|---|---|
@@ -118,3 +127,14 @@ channels:
 | 上传接口 | 独立，不互通 | 独立，不互通 |
 
 其他：`msg_type` `0` 文本 / `2` markdown / `7` 富媒体；相同 `msg_id`+`msg_seq` 重复发送失败；机器人须 WebSocket 在线才能发消息；用户可关闭"允许主动发送"。
+
+## 12 凭证与现网参数
+
+- 机器人：`app_id = <app_id>`（用户名「机器人账号」），走**生产**环境。
+- `app_secret` **不写入仓库、不写入文档、不进日志**。取值路径（NAS 上，`0600`）：
+  `ssh 内网主机` → `~/原部署/.security.yml` 的 `channel_list.qq.settings.app_secret`。
+  ivan 侧配置通过 `IVAN_QQ_APP_SECRET` 环境变量或 `channels.qq.app_secret`（文件 0600）注入。
+- 现网占用情况：picoclaw 的 QQ 通道**自 2026-10-19 起启动失败**（`/gateway/bot` 返回 `401 code 11241 请求头Authorization参数格式错误`，botgo v0.2.1 与新网关不兼容），
+  其 launcher/gateway 进程虽在跑但**未占用 ws 连接**，ivan 可直接使用该凭证。
+  若日后修复 picoclaw 并重新启用 QQ 通道，两边会争抢事件与 `msg_seq` → **同一 appid 只允许一个在线实现**，启用 ivan 前先停 picoclaw 的 qq 通道。
+- 该凭证的历史日志（`~/原部署/logs/gateway.log`）里曾**明文出现 app_secret 与 access_token**（botgo debug 日志），已是既成事实，但更说明 ivan 侧必须守住「凭证不进日志」。
