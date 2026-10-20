@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P1 已完成**（bus + channel 抽象 + cli/log 通道 + daemon：socket、单实例锁、优雅停机、status）；下一步 P2（`qqbot/` 协议包 + `channel/qq` 适配器）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/channels.md` §10 与 `docs/sessions.md` §9。
+> 状态：**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线；生产凭证真机出站已通、入站待确认）；下一步 P3（定时与计划任务）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
 
 ## 设计约束
 
@@ -12,7 +12,8 @@
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 tanya（`bus`+`channel` 抽库时成对抽出）
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
-- 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）
+- 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`
+- `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
 - 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；危险命令最小黑名单拦截；AppSecret 不进日志/事件/错误信息
@@ -45,7 +46,9 @@ runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
-qqbot/ schedule/      规划中（见 docs/plan.md §5，P2/P3）
+qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
+channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、msg_seq 计数、图片下载/上传、白名单 [已实现]
+schedule/             规划中（见 docs/plan.md §5，P3）
 ```
 
 ## 文档

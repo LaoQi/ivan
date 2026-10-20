@@ -1,7 +1,8 @@
 # QQ 官方机器人通道
 
 > 状态：规划。接入 QQ 开放平台**官方机器人**（不走 OneBot）。协议自实现（D3）。
-> 状态：**协议事实已核对**（官方文档抓取 + 真机凭证实测，2026-10-20），结论见 §10；凭证来源见 §12。
+> 状态：**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线）。协议事实已核对（文档抓取 + 真机实测），结论见 §10；凭证来源见 §12；
+> 实现记录见 §13。真机 **出站（主动消息）已验证**；**入站单聊/群 @ 待用户实发确认**。
 
 ## 1 范围
 
@@ -37,6 +38,9 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
   （实测该 appid `shards:1`、`max_concurrency:1`、`remaining:1500`/天）。API base 生产 `https://api.sgroup.qq.com`；**沙箱已下线**，只做生产。
 - opcode（已核对）：`0` dispatch / `1` heartbeat / `2` identify / `6` resume / `7` reconnect / `9` invalid session / `10` hello / `11` heartbeat ack / `12` http 回调 ack / `13` 回调地址验证。
 - 流程：连上 → `op10 hello{heartbeat_interval}` → `op2 identify{token, intents, shard:[0,1], properties}` → `op0 READY`（记 `session_id` 与 `s`）→ 定时 `op1`（带最新 `s`）→ `op11` ack。
+- **关键实测补充（官方文档未写）**：`op2 identify` / `op6 resume` 的 **`d.token` 必须带 `QQBot ` 前缀**（与 REST 的 `Authorization` 头同格式）。
+  裸 token 会被服务端**直接判 `op9 invalid session`**（`d:false`，即"可重连"），且**不区分 intents**（`intents:0` 与 `1<<25` 表现一致）——这正是 picoclaw/botgo 失败的同类症状。
+  `READY.d` 含 `version`/`session_id`/`user{id,username,bot,status}`/`shard`。
 - 心跳：按 `heartbeat_interval` 的 80% 发；连续未收到 ack 判定连接僵死 → 主动重连。
 - 重连策略：
   - 网络断开/写失败 → 尝试 `op6 resume{token, session_id, seq}`；resume 成功则事件补投（去重仍兜底）。
@@ -115,6 +119,8 @@ channels:
 - [x] 错误码：body 用 `err_code`（非 `code`）+ `message` + `trace_id`；HTTP 429 = 限流；401 认证失败；常见业务码 `11251/11261` appid 错、`11253` 无权限、`11254` 接口封禁
 - [x] 频控：消息接口 100 QPS（单聊/群聊一致），文件接口 50 QPS；网关会话启动 `1500` 次/天（`max_concurrency: 1`）
 
+- [x] `identify`/`resume` 的 `d.token` 必须带 `QQBot ` 前缀（**真机实测**：裸 token → `op9`；带前缀 → `READY`）
+
 ## 11 官方规则速查（文档抓取 2026-10-10，2026-10-20 复核）
 
 | 项 | 单聊 | 群聊 |
@@ -138,3 +144,48 @@ channels:
   其 launcher/gateway 进程虽在跑但**未占用 ws 连接**，ivan 可直接使用该凭证。
   若日后修复 picoclaw 并重新启用 QQ 通道，两边会争抢事件与 `msg_seq` → **同一 appid 只允许一个在线实现**，启用 ivan 前先停 picoclaw 的 qq 通道。
 - 该凭证的历史日志（`~/原部署/logs/gateway.log`）里曾**明文出现 app_secret 与 access_token**（botgo debug 日志），已是既成事实，但更说明 ivan 侧必须守住「凭证不进日志」。
+
+## 13 P2 实现记录（2026-10-20）
+
+代码：`qqbot/`（纯协议，仅依赖标准库 + `gorilla/websocket`，零 ivan 依赖）、`channel/qq/`（适配器）、`config` 增 `channels.qq`、`daemon` 接线与 `status` 展示。
+
+### 13.1 qqbot 包
+
+```go
+qqbot.Config{AppID, AppSecret, Intents, Shard, APIBase, TokenURL, GatewayURL, UserAgent, HTTPClient, Logf, MinBackoff, MaxBackoff}
+qqbot.New(Config) (*Client, error)                 // 缺凭证报错
+(*Client).Start(ctx, Handler) error                // 异步；token 后台刷新 + 网关循环
+(*Client).Stop(ctx) error
+(*Client).SendText / SendMarkdown / SendImage / SendTextReply / UploadImageBytes / UploadImageURL
+(*Client).Gateway(ctx) (*GatewayInfo, error)       // /gateway/bot
+(*Client).Stats() Stats                            // 连接/会话/计数/最后错误/最后心跳
+qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
+```
+
+- `types.go`：`Config`/`Target`/`MessageEvent`/`Attachment`/`ReadyInfo`/`GatewayInfo`/opcode 与 `msg_type` 常量；`flexInt` 兼容 `expires_in` 的**字符串/数字**两种形态。
+- `token.go`：`getAppAccessToken`（默认 `api.bot.qq.com`），**80% TTL 提前刷新**，失败指数退避重试且**旧 token 到期前不阻塞收发**；AppSecret 不进错误信息。
+- `errors.go`：`Error{Status,Code,Message,TraceID,Class,Op}` + `classify`（429→限流、401→认证、403→权限、`40034005`→窗口过期、5xx→服务端），`Retryable/AuthFailed/WindowExpired` 助手；响应体含 `secret`/`token` 等字样时**整体打码**。
+- `gateway.go`：hello→identify→READY→心跳（interval 80%）→ack 超时（2×间隔）判定僵死重连；`op7`→清 session 重连、`op9`→丢弃 session 重 identify、`op6 resume` 补投；指数退避 + 抖动（默认 1s→60s）；单分片。
+  **`d.token` 自动补 `QQBot ` 前缀**（见 §4）。
+- `dedup.go`：`MessageID` TTL（5 分钟）+ 容量上限（4096）去重。
+- `api.go`：REST（`/gateway/bot`、`/v2/users|groups/{id}/messages`、`/files`），统一带 `Authorization: QQBot <token>`。
+
+### 13.2 channel/qq 适配器
+
+- `Config{AppID, AppSecret, AllowFrom, AllowGroups, MaxMessageLen, AllowProactive, ReconnectMax, MediaDir, MediaMaxBytes, Timeout, APIBase/TokenURL/GatewayURL, Logf, HTTPClient}`。
+- 入站：`C2C_MESSAGE_CREATE`→`ChatType=direct`（`ChatID=user_openid`）、`GROUP_AT_MESSAGE_CREATE`→`group`（`ChatID=group_openid`，`Mentioned=true`）；`Raw` 带 `msg_id`；白名单（`allow_from`/`allow_groups`，空=放行）；附件下载到 `media/` 转 `MediaRef`（`MediaMaxBytes` 截断、0600）。
+- 出站：解析目标（优先用入站登记的 openid/group）；**`msg_seq` 以入站 `msg_id` 为键**计数，单聊窗口 60 分钟/上限 4、群聊 5 分钟/上限 5，超限且未开 `allow_proactive` 则报错；有 `msg_id` 走被动回复，否则（`allow_proactive`）走主动消息。
+- 图片：出站先 `/files` 上传（`file_type:1`、`srv_send_msg:false`）取 `file_info`，再 `msg_type:7` 发送；**分片上传本期未实现**（>5MB 直接报错，留待后续）。
+- `MaxLen()=max_message_len`（默认 1200），出站走通用切分器。
+
+### 13.3 测试
+
+- 协议单测（`qqbot/`）：token 字符串/数字兼容、错误分类与打码、助手函数、去重 TTL/容量、**假网关**（`httptest` + 真 ws）覆盖 READY/identify 帧、单聊与群事件映射、重复事件丢弃、心跳与 ack、断线 `resume`、`op9` 重 identify、心跳超时重连、发送（`Authorization`/路径/`msg_id`/`msg_seq`/`msg_type`）、窗口过期、认证失败、无目标、停止。
+- 适配器单测（`channel/qq/`）：单聊/群翻译与会话键、白名单、缺标识拒绝、被动 `msg_seq` 递增与**按 msg_id 隔离**、单聊 4/群 5 上限、主动消息无 `msg_id`、图片上传+发送三步、附件下载落盘、`MaxLen` 默认。
+- `go test ./...` 与 `-race` 全绿。
+
+### 13.4 真机验证（生产凭证）
+
+- **出站（主动消息）通过**：`channel/qq` → `qqbot` 全链路向本人 openid 发送文本，返回消息 id（HTTP 200）。
+- **入站待确认**：`READY` 成功、连接稳定（心跳 ack 持续、无重连），但截至记录时未收到用户实发的 `C2C_MESSAGE_CREATE`（用户侧是否发送、机器人是否被会话可见，需用户确认）。
+- 期间发现并修正了 §4 的 `token` 前缀问题（裸 token 直接被 `op9` 拒绝）。
