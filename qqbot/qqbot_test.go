@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -439,5 +440,75 @@ func TestWSTokenPrefix(t *testing.T) {
 	}
 	if got := wsToken(""); got != "" {
 		t.Fatalf("空 token 不应加前缀，得到 %q", got)
+	}
+}
+
+func TestIdentifyPropertiesAnnounceClient(t *testing.T) {
+	f := newFakeGateway(t)
+	cfg := testConfig(f)
+	cfg.UserAgent = "ivan/v9.9.9 (+https://example.invalid)"
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := newRecordingHandler()
+	if err := c.Start(context.Background(), h); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.Stop(ctx)
+	})
+	<-h.ready
+
+	select {
+	case d := <-f.identified:
+		if d.Properties["$browser"] != "ivan/v9.9.9" {
+			t.Fatalf("$browser 期望 ivan/v9.9.9，得到 %q", d.Properties["$browser"])
+		}
+		if d.Properties["$os"] != runtime.GOOS {
+			t.Fatalf("$os 期望 %s，得到 %q", runtime.GOOS, d.Properties["$os"])
+		}
+		if d.Properties["$device"] != "ivan" {
+			t.Fatalf("$device 期望 ivan，得到 %q", d.Properties["$device"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("未收到 identify")
+	}
+}
+
+func TestIdentifyPropertiesDefaultBrowser(t *testing.T) {
+	c := &Client{cfg: Config{}}
+	props := c.identifyProperties()
+	if props["$browser"] != "ivan" {
+		t.Fatalf("无 UA 时 $browser 应退回 ivan，得到 %q", props["$browser"])
+	}
+}
+
+func TestRESTUserAgent(t *testing.T) {
+	f := newFakeGateway(t)
+	cfg := testConfig(f)
+	cfg.UserAgent = "ivan/v1.2.3 (+https://example.invalid)"
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := newRecordingHandler()
+	if err := c.Start(context.Background(), h); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.Stop(ctx)
+	})
+	<-h.ready
+
+	if _, err := c.SendText(context.Background(), Target{UserOpenID: "u-1"}, "hi", "m-1", 1); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	if got := f.lastUserAgent(); got != "ivan/v1.2.3 (+https://example.invalid)" {
+		t.Fatalf("REST User-Agent 期望透传，得到 %q", got)
 	}
 }

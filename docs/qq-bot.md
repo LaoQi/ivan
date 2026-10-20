@@ -38,6 +38,8 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
   （实测该 appid `shards:1`、`max_concurrency:1`、`remaining:1500`/天）。API base 生产 `https://api.sgroup.qq.com`；**沙箱已下线**，只做生产。
 - opcode（已核对）：`0` dispatch / `1` heartbeat / `2` identify / `6` resume / `7` reconnect / `9` invalid session / `10` hello / `11` heartbeat ack / `12` http 回调 ack / `13` 回调地址验证。
 - 流程：连上 → `op10 hello{heartbeat_interval}` → `op2 identify{token, intents, shard:[0,1], properties}` → `op0 READY`（记 `session_id` 与 `s`）→ 定时 `op1`（带最新 `s`）→ `op11` ack。
+- **接入方信息（identify `properties`）**：`$os` 取 `runtime.GOOS`、`$browser` 取 `UserAgent` 首段（如 `ivan/dev`）、`$device` 固定 `ivan`；
+  日志在 identify 时打印 `browser=`/`os=` 便于核对。REST（取 token / 发消息 / 上传）透传同一 `User-Agent`，不设时才是 Go 默认的 `Go-http-client/2.0`。
 - **关键实测补充（官方文档未写）**：`op2 identify` / `op6 resume` 的 **`d.token` 必须带 `QQBot ` 前缀**（与 REST 的 `Authorization` 头同格式）。
   裸 token 会被服务端**直接判 `op9 invalid session`**（`d:false`，即"可重连"），且**不区分 intents**（`intents:0` 与 `1<<25` 表现一致）——这正是 picoclaw/botgo 失败的同类症状。
   `READY.d` 含 `version`/`session_id`/`user{id,username,bot,status}`/`shard`。
@@ -163,7 +165,7 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 ```
 
 - `types.go`：`Config`/`Target`/`MessageEvent`/`Attachment`/`ReadyInfo`/`GatewayInfo`/opcode 与 `msg_type` 常量；`flexInt` 兼容 `expires_in` 的**字符串/数字**两种形态。
-- `token.go`：`getAppAccessToken`（默认 `api.bot.qq.com`），**80% TTL 提前刷新**，失败指数退避重试且**旧 token 到期前不阻塞收发**；AppSecret 不进错误信息。
+- `token.go`：`getAppAccessToken`（默认 `api.bot.qq.com`），REST 统一透传 `UserAgent`（接入方标识），**80% TTL 提前刷新**，失败指数退避重试且**旧 token 到期前不阻塞收发**；AppSecret 不进错误信息。
 - `errors.go`：`Error{Status,Code,Message,TraceID,Class,Op}` + `classify`（429→限流、401→认证、403→权限、`40034005`→窗口过期、5xx→服务端），`Retryable/AuthFailed/WindowExpired` 助手；响应体含 `secret`/`token` 等字样时**整体打码**。
 - `gateway.go`：hello→identify→READY→心跳（interval 80%）→ack 超时（2×间隔）判定僵死重连；`op7`→清 session 重连、`op9`→丢弃 session 重 identify、`op6 resume` 补投；指数退避 + 抖动（默认 1s→60s）；单分片。
   **`d.token` 自动补 `QQBot ` 前缀**（见 §4）。

@@ -121,6 +121,7 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			AllowProactive: cfg.Channels.QQ.AllowProactive,
 			ReconnectMax:   time.Duration(cfg.Channels.QQ.ReconnectMaxSec) * time.Second,
 			MediaDir:       cfg.MediaDir(),
+			UserAgent:      config.UserAgent(d.version),
 			Logf:           func(format string, args ...any) { _ = d.human.Notice(format, args...) },
 		})
 		if err != nil {

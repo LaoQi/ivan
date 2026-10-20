@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -195,17 +196,17 @@ func (c *Client) handshake(ctx context.Context, w *wsConn, sess **session) error
 		c.cfg.Logf("qqbot 已发送 resume session=%s seq=%d", shortID((*sess).id), (*sess).seq)
 	} else {
 		frame := envelope{Op: opIdentify, D: mustJSON(identifyData{
-			Token:   token,
-			Intents: c.cfg.Intents,
-			Shard:   c.cfg.Shard,
-			Properties: map[string]string{
-				"$os": "linux", "$browser": "ivan", "$device": "ivan",
-			},
+			Token:      token,
+			Intents:    c.cfg.Intents,
+			Shard:      c.cfg.Shard,
+			Properties: c.identifyProperties(),
 		})}
 		if err := w.writeJSON(frame); err != nil {
 			return fmt.Errorf("qqbot 发送 identify 失败: %w", err)
 		}
-		c.cfg.Logf("qqbot 已发送 identify intents=%d shard=%v", c.cfg.Intents, c.cfg.Shard)
+		props := c.identifyProperties()
+		c.cfg.Logf("qqbot 已发送 identify intents=%d shard=%v browser=%s os=%s",
+			c.cfg.Intents, c.cfg.Shard, props["$browser"], props["$os"])
 	}
 	_ = w.c.SetReadDeadline(time.Time{})
 
@@ -368,6 +369,18 @@ func jitter(d time.Duration) time.Duration {
 	}
 	delta := time.Duration(rand.Int63n(int64(d/2) + 1))
 	return d/2 + delta
+}
+
+func (c *Client) identifyProperties() map[string]string {
+	browser := "ivan"
+	if fields := strings.Fields(c.cfg.UserAgent); len(fields) > 0 {
+		browser = fields[0]
+	}
+	return map[string]string{
+		"$os":      runtime.GOOS,
+		"$browser": browser,
+		"$device":  "ivan",
+	}
 }
 
 const wsTokenPrefix = "QQBot "

@@ -30,6 +30,7 @@ type fakeGateway struct {
 	conn         *websocket.Conn
 	wmu          sync.Mutex
 	sends        []sendCall
+	userAgents   []string
 	pending      []map[string]any
 	sendStatus   int
 	sendBody     string
@@ -140,6 +141,7 @@ func (f *fakeGateway) serveSend(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
 	f.sends = append(f.sends, sendCall{Path: r.URL.Path, Body: body})
+	f.userAgents = append(f.userAgents, r.Header.Get("User-Agent"))
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"id":"msg-out-1","timestamp":"2026-10-20T00:00:00Z"}`))
@@ -176,6 +178,15 @@ func (f *fakeGateway) killConn() {
 	if conn != nil {
 		_ = conn.Close()
 	}
+}
+
+func (f *fakeGateway) lastUserAgent() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.userAgents) == 0 {
+		return ""
+	}
+	return f.userAgents[len(f.userAgents)-1]
 }
 
 func (f *fakeGateway) setHelloMs(ms int) {

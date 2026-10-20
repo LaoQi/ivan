@@ -41,6 +41,7 @@ type Config struct {
 	MediaDir       string
 	MediaMaxBytes  int64
 	Timeout        time.Duration
+	UserAgent      string
 	APIBase        string
 	TokenURL       string
 	GatewayURL     string
@@ -89,6 +90,7 @@ func New(cfg Config) (*Channel, error) {
 		APIBase:    cfg.APIBase,
 		TokenURL:   cfg.TokenURL,
 		GatewayURL: cfg.GatewayURL,
+		UserAgent:  cfg.UserAgent,
 		MaxBackoff: cfg.ReconnectMax,
 		Logf:       cfg.Logf,
 	})
