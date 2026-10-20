@@ -16,6 +16,7 @@ import (
 	chlog "github.com/LaoQi/ivan/channel/log"
 	"github.com/LaoQi/ivan/config"
 	"github.com/LaoQi/ivan/data"
+	"github.com/LaoQi/ivan/schedule"
 )
 
 type Options struct {
@@ -25,6 +26,14 @@ type Options struct {
 	State  *data.State
 	Bus    *bus.Bus
 	Stream io.Writer
+	Notify func(ctx context.Context, msg bus.OutboundMessage) error
+}
+
+type Turn struct {
+	Session     string
+	Tokens      int
+	Context     int
+	NotifyError string
 }
 
 type Runner struct {
@@ -47,6 +56,9 @@ type Runner struct {
 	wg          sync.WaitGroup
 	turnCtx     context.Context
 	cancelTurns context.CancelFunc
+
+	schedMu sync.RWMutex
+	sched   *schedule.Scheduler
 }
 
 type AgentStatus struct {
@@ -99,11 +111,16 @@ func New(opts Options) (*Runner, error) {
 }
 
 func (r *Runner) Dispatch(ctx context.Context, msg bus.InboundMessage) error {
+	_, err := r.DispatchTurn(ctx, msg)
+	return err
+}
+
+func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn, error) {
 	if r.closed.Load() {
-		return errors.New("runner 已关闭")
+		return Turn{}, errors.New("runner 已关闭")
 	}
 	if strings.TrimSpace(msg.Content) == "" && len(msg.Media) == 0 {
-		return errors.New("入站消息内容为空")
+		return Turn{}, errors.New("入站消息内容为空")
 	}
 	key := bus.SessionKey(msg)
 	inst := r.acquire(key)
@@ -111,14 +128,16 @@ func (r *Runner) Dispatch(ctx context.Context, msg bus.InboundMessage) error {
 	defer inst.mu.Unlock()
 	inst.lastUsed = time.Now()
 	inst.turns++
+	inst.setTarget(replyChannel(msg), msg.ChatID, key)
 	r.inFlight.Add(1)
 	defer r.inFlight.Add(-1)
 
 	t := &task{r: r, inst: inst, msg: msg, key: key}
 	err := t.run(ctx)
 
+	turn := Turn{Tokens: t.usedTokens(), Context: t.contextTokens()}
 	out := bus.OutboundMessage{
-		Channel: msg.Channel,
+		Channel: replyChannel(msg),
 		ChatID:  msg.ChatID,
 		ReplyTo: msg.MessageID,
 		Content: t.text(),
@@ -130,10 +149,73 @@ func (r *Runner) Dispatch(ctx context.Context, msg bus.InboundMessage) error {
 			out.Content = "error: " + briefErr(err)
 		}
 	}
-	if r.opts.Bus != nil && !r.opts.Bus.Post(out) {
-		r.dropped.Add(1)
+	if ag := inst.ag; ag != nil {
+		turn.Session = ag.SessionID()
 	}
-	return err
+	if out.Channel != msg.Channel {
+		turn.NotifyError = r.deliver(ctx, out)
+	} else if r.opts.Bus != nil && !r.opts.Bus.Post(out) {
+		r.dropped.Add(1)
+		turn.NotifyError = "出站队列已满或已关闭"
+	}
+	return turn, err
+}
+
+func replyChannel(msg bus.InboundMessage) string {
+	if ch := strings.TrimSpace(msg.ReplyChannel); ch != "" {
+		return ch
+	}
+	return msg.Channel
+}
+
+func (r *Runner) deliver(ctx context.Context, msg bus.OutboundMessage) string {
+	if r.opts.Notify == nil {
+		return "未接出站投递钩子"
+	}
+	if err := r.opts.Notify(ctx, msg); err != nil {
+		return briefErr(err)
+	}
+	return ""
+}
+
+func (r *Runner) SetScheduler(s *schedule.Scheduler) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+	r.sched = s
+}
+
+func (r *Runner) Scheduler() *schedule.Scheduler {
+	r.schedMu.RLock()
+	defer r.schedMu.RUnlock()
+	return r.sched
+}
+
+func (r *Runner) TriggerJob(ctx context.Context, t schedule.Trigger) schedule.Outcome {
+	if r.closed.Load() {
+		return schedule.Outcome{Err: errors.New("runner 已关闭")}
+	}
+	select {
+	case r.sem <- struct{}{}:
+	case <-r.turnCtx.Done():
+		return schedule.Outcome{Err: errors.New("runner 正在停机")}
+	case <-ctx.Done():
+		return schedule.Outcome{Err: ctx.Err()}
+	}
+	defer func() { <-r.sem }()
+	msg := bus.InboundMessage{
+		Channel:      bus.ChannelSchedule,
+		ReplyChannel: t.Channel,
+		ChatID:       t.ChatID,
+		ChatType:     bus.ChatDirect,
+		SenderID:     "schedule",
+		SenderName:   t.Name,
+		Content:      t.Prompt,
+		SessionKey:   t.SessionKey,
+		ReceivedAt:   time.Now(),
+		Raw:          map[string]string{"trigger": "schedule", "job_id": t.JobID},
+	}
+	turn, err := r.DispatchTurn(ctx, msg)
+	return schedule.Outcome{Tokens: turn.Tokens, NotifyErr: turn.NotifyError, Err: err}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -157,7 +239,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					return
 				}
 				defer func() { <-r.sem }()
-				if err := r.Dispatch(r.turnCtx, m); err != nil {
+				if _, err := r.DispatchTurn(r.turnCtx, m); err != nil {
 					r.human(chlog.Event{Kind: "error", Session: bus.SessionKey(m), Channel: m.Channel, Err: briefErr(err), Failed: true})
 				}
 			}(msg)

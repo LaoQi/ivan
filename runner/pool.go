@@ -23,6 +23,29 @@ type instance struct {
 	ag       *agent.Agent
 	lastUsed time.Time
 	turns    uint64
+
+	targetMu   sync.Mutex
+	channel    string
+	chatID     string
+	sessionKey string
+}
+
+type chatTarget struct {
+	Channel    string
+	ChatID     string
+	SessionKey string
+}
+
+func (i *instance) setTarget(channel, chatID, sessionKey string) {
+	i.targetMu.Lock()
+	defer i.targetMu.Unlock()
+	i.channel, i.chatID, i.sessionKey = channel, chatID, sessionKey
+}
+
+func (i *instance) target() chatTarget {
+	i.targetMu.Lock()
+	defer i.targetMu.Unlock()
+	return chatTarget{Channel: i.channel, ChatID: i.chatID, SessionKey: i.sessionKey}
 }
 
 func (r *Runner) acquire(key string) *instance {
@@ -123,6 +146,9 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if r.Scheduler() != nil {
+		list = append(list, r.scheduleTool(inst))
 	}
 	ag, err = agent.New(&r.cfg.Config,
 		agent.WithSystemPrompt(prompt.System(inst.ws, r.cfg.DataDir)),

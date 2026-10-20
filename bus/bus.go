@@ -27,19 +27,20 @@ type MediaRef struct {
 }
 
 type InboundMessage struct {
-	Channel    string            `json:"channel"`
-	Account    string            `json:"account,omitempty"`
-	ChatID     string            `json:"chat_id,omitempty"`
-	ChatType   string            `json:"chat_type,omitempty"`
-	SenderID   string            `json:"sender_id,omitempty"`
-	SenderName string            `json:"sender_name,omitempty"`
-	MessageID  string            `json:"message_id,omitempty"`
-	Content    string            `json:"content,omitempty"`
-	Media      []MediaRef        `json:"media,omitempty"`
-	Mentioned  bool              `json:"mentioned,omitempty"`
-	SessionKey string            `json:"session_key,omitempty"`
-	ReceivedAt time.Time         `json:"received_at,omitempty"`
-	Raw        map[string]string `json:"raw,omitempty"`
+	Channel      string            `json:"channel"`
+	Account      string            `json:"account,omitempty"`
+	ChatID       string            `json:"chat_id,omitempty"`
+	ChatType     string            `json:"chat_type,omitempty"`
+	SenderID     string            `json:"sender_id,omitempty"`
+	SenderName   string            `json:"sender_name,omitempty"`
+	MessageID    string            `json:"message_id,omitempty"`
+	Content      string            `json:"content,omitempty"`
+	Media        []MediaRef        `json:"media,omitempty"`
+	Mentioned    bool              `json:"mentioned,omitempty"`
+	SessionKey   string            `json:"session_key,omitempty"`
+	ReplyChannel string            `json:"reply_channel,omitempty"`
+	ReceivedAt   time.Time         `json:"received_at,omitempty"`
+	Raw          map[string]string `json:"raw,omitempty"`
 }
 
 type OutboundMessage struct {
