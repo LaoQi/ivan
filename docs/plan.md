@@ -1,6 +1,6 @@
 # ivan 规划总纲
 
-> 状态：**P0、P1 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon）；**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器，出站真机已验证、入站待用户实发确认）；下一步 P3。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
+> 状态：**P0、P1 已完成**（P0 骨架与复用探针、P1 bus/channel/本地通道/daemon）；**P2 已完成**（`qqbot/` 协议包 + `channel/qq` 适配器，单聊全链路真机验证通过、群 @ 待验）；下一步 P3。本文件是权威总纲，实现细节见各分册；现行约束另见根 `AGENTS.md`。
 
 ## 1 定位
 
@@ -104,7 +104,7 @@ qqbot/             QQ 开放平台协议实现（token / gateway / websocket / �
 |---|---|---|
 | P0 | 复用探针 + 仓库骨架：go.work、config、`ivan run` 前台单发 + 事件日志 | 无 TTY 下 `run_shell` 正常、`interactive` 明确报错不卡、交接自动续跑、`LoadSession` 恢复、多实例并发；产出 `docs/reuse-probe.md` |
 | P1 | `bus` + `channel` 抽象 + `cli`/`log` 通道 + daemon（socket、单实例锁、优雅停机、status） | ✅ 两个通道跑通；daemon 重启后状态可查、会话可续（`docs/channels.md` §10、`docs/sessions.md` §9） |
-| P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**出站已通**、入站待确认（`docs/qq-bot.md` §13） |
+| P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**单聊全链路已通**（入站→回合→回复），群 @/图片待验（`docs/qq-bot.md` §13） |
 | P3 | 定时与计划任务：Job 存储、调度循环、`schedule` 工具、结果回原渠道 | 重启后作业恢复；模型自建任务按时触发并把结果发回会话 |
 | P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接、按需读取的记忆/目标文件、预算熔断、暂停开关 | 在指定低风险工作区开启后，单条消息触发能跨会话推进并被轮次/预算/暂停约束住；不承诺无人值守完成开放目标 |
 | P5 | 安全与运维：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 危险命令被拦；服务随 systemd 起停 |

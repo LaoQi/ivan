@@ -2,7 +2,7 @@
 
 > 状态：规划。接入 QQ 开放平台**官方机器人**（不走 OneBot）。协议自实现（D3）。
 > 状态：**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线）。协议事实已核对（文档抓取 + 真机实测），结论见 §10；凭证来源见 §12；
-> 实现记录见 §13。真机 **出站（主动消息）已验证**；**入站单聊/群 @ 待用户实发确认**。
+> 实现记录见 §13。真机**单聊全链路已验证**（入站→runner 回合→被动回复），**群 @ 待验证**。
 
 ## 1 范围
 
@@ -189,5 +189,8 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 ### 13.4 真机验证（生产凭证）
 
 - **出站（主动消息）通过**：`channel/qq` → `qqbot` 全链路向本人 openid 发送文本，返回消息 id（HTTP 200）。
-- **入站待确认**：`READY` 成功、连接稳定（心跳 ack 持续、无重连），但截至记录时未收到用户实发的 `C2C_MESSAGE_CREATE`（用户侧是否发送、机器人是否被会话可见，需用户确认）。
+- **入站 + 全链路（daemon 端到端）通过**：用户向机器人实发单聊消息后，daemon 侧 `qq.messages=1`、`runner.turns=1`、`failures=0`、`qq.sent=1`；
+  日志显示 `turn_start session=qq:c2c:<openid> channel=qq` → `run_shell` 在**该会话独立工作区** `<data_dir>/agents/qq-c2c-<openid>/` 执行 → `turn_end`，
+  用户侧收到回复（被动回复 `msg_seq=1`）。
+- **尚未验证**：群 @（`GROUP_AT_MESSAGE_CREATE`，需机器人被拉群）；图片收发（上传/下载路径仅单测覆盖）；分片上传未实现。
 - 期间发现并修正了 §4 的 `token` 前缀问题（裸 token 直接被 `op9` 拒绝）。

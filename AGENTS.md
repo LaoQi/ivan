@@ -3,7 +3,7 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P2 已实现**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线；生产凭证真机出站已通、入站待确认）；下一步 P3（定时与计划任务）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
+> 状态：**P2 已完成**（`qqbot/` 协议包 + `channel/qq` 适配器 + 配置/daemon 接线；生产凭证真机单聊全链路已验证，群 @/图片待验）；下一步 P3（定时与计划任务）。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/qq-bot.md` §13、`docs/channels.md` §10 与 `docs/sessions.md` §9。
 
 ## 设计约束
 
