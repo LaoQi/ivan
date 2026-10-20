@@ -336,3 +336,28 @@ func TestHintThenForceEscalation(t *testing.T) {
 		t.Fatalf("计数异常: hinted=%d forced=%d", st.Hinted, st.Forced)
 	}
 }
+
+func TestForceAfterHandoffReportsDiagnostic(t *testing.T) {
+	srv := fakellm.New(
+		handoffStep("交接一次", true),
+		fakellm.Step{Content: "新会话里回答", Usage: fakellm.Usage{PromptTokens: 250, CompletionTokens: 10, TotalTokens: 260}},
+		fakellm.Step{Content: "还是没交接", Usage: fakellm.Usage{PromptTokens: 270, CompletionTokens: 10, TotalTokens: 280}},
+		fakellm.Step{Content: "不该跑到"},
+	)
+	defer srv.Close()
+	cfg := bareConfig(t, srv.BaseURL())
+	cfg.Runner.HandoffHintTokens = 100
+	cfg.Runner.HandoffForceTokens = 200
+	cfg.Runner.AutoContinue = true
+	r := newP4Rig(t, cfg, nil)
+	if err := r.Dispatch(context.Background(), inbound("cli:default", "r1", "长任务")); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if calls := srv.Calls(); calls != 4 {
+		t.Fatalf("请求数 %d，期望 4（交接后重置两档，最多再提示一次）", calls)
+	}
+	st := r.Status()
+	if st.Handoffs != 1 || st.Forced != 1 {
+		t.Fatalf("计数异常: handoffs=%d forced=%d", st.Handoffs, st.Forced)
+	}
+}

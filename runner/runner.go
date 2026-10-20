@@ -484,7 +484,7 @@ func (t *task) run(ctx context.Context) error {
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 		}
 	}()
-	hinted, forced := false, false
+	hinted, forced, hops := false, false, 0
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
 		if err != nil {
@@ -504,6 +504,8 @@ func (t *task) run(ctx context.Context) error {
 			return err
 		}
 		if h, ok := ag.TakeHandoff(); ok {
+			hops++
+			hinted, forced = false, false
 			t.r.handoffs.Add(1)
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 			t.r.human(chlog.Event{Kind: "handoff", Session: t.key, Channel: t.msg.Channel, Handoff: true, Text: h.OldID + " → " + h.NewID})
@@ -530,7 +532,7 @@ func (t *task) run(ctx context.Context) error {
 			return nil
 		}
 		if level == pressureForce && forced {
-			t.forcedStop()
+			t.forcedStop(hops)
 			return nil
 		}
 		if t.r.paused() {
@@ -584,8 +586,12 @@ func (t *task) levelTokens(level handoffPressure) int {
 	return t.r.cfg.Runner.HandoffHintTokens
 }
 
-func (t *task) forcedStop() {
+func (t *task) forcedStop(hops int) {
 	text := fmt.Sprintf("上下文 %d tokens 达强制交接阈值 %d，模型仍未交接，本任务已停止（下次消息继续）", t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens)
+	if hops > 0 {
+		text = fmt.Sprintf("上下文 %d tokens 仍达强制交接阈值 %d（本任务已交接 %d 次，新会话基线即超阈值），已停止；请调高 handoff_*_tokens 或拆分任务",
+			t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens, hops)
+	}
 	t.r.human(chlog.Event{Kind: "handoff_forced", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: text})
 	t.r.note("handoff_forced", t.key+" "+text)
 }
