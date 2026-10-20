@@ -34,6 +34,7 @@ const (
 	OpJobsRemove = "jobs/remove"
 	OpJobsRun    = "jobs/run"
 	OpPause      = "pause"
+	OpCancel     = "cancel"
 	OpResume     = "resume"
 
 	maxFrame = 1 << 20

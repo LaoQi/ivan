@@ -107,11 +107,21 @@ func TestSendStatusRestartResume(t *testing.T) {
 	if !st.Running || st.PID != os.Getpid() {
 		t.Fatalf("status 异常: %+v", st)
 	}
+	deadline := time.Now().Add(3 * time.Second)
+	for st.Channels[0].Sent == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		st = fetchStatus(t, cfg)
+	}
 	if len(st.Channels) != 1 || st.Channels[0].Name != "cli" || st.Channels[0].Sent != 1 {
 		t.Fatalf("通道状态异常: %+v", st.Channels)
 	}
 	if st.Runner.Turns != 1 || st.Runner.Agents != 1 || st.Bus.Inbound != 1 || st.Bus.Outbound != 1 {
 		t.Fatalf("计数异常: %+v", st)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for st.Events.Written == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		st = fetchStatus(t, cfg)
 	}
 	if st.Events.Written == 0 {
 		t.Fatal("事件未落盘")

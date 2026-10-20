@@ -203,3 +203,34 @@ func TestModelCreatesJobThroughTool(t *testing.T) {
 		t.Fatalf("status 未反映触发: %+v", st.Schedule)
 	}
 }
+
+func TestCancelAndPauseControl(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Content: "x"})
+	defer srv.Close()
+	cfg := testConfig(t, srv)
+	d, err := New(cfg, "test", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Release()
+	if _, err := d.Control(cli.OpCancel, ""); err == nil {
+		t.Fatal("缺少会话键应报错")
+	}
+	if _, err := d.Control(cli.OpCancel, "cli:default"); err == nil {
+		t.Fatal("没有在跑回合时应报错")
+	}
+	if raw, err := d.Control(cli.OpPause, ""); err != nil {
+		t.Fatalf("pause: %v", err)
+	} else if m, ok := raw.(map[string]bool); !ok || !m["paused"] {
+		t.Fatalf("pause 返回异常: %T %+v", raw, raw)
+	}
+	if !d.Status().Runner.Paused {
+		t.Fatal("status.runner.paused 未反映暂停")
+	}
+	if _, err := d.Control(cli.OpResume, ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if d.Status().Runner.Paused {
+		t.Fatal("恢复后仍显示暂停")
+	}
+}

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,21 @@ type instance struct {
 	channel    string
 	chatID     string
 	sessionKey string
+
+	cancelMu sync.Mutex
+	cancel   context.CancelFunc
+}
+
+func (i *instance) setCancel(fn context.CancelFunc) {
+	i.cancelMu.Lock()
+	defer i.cancelMu.Unlock()
+	i.cancel = fn
+}
+
+func (i *instance) cancelFunc() context.CancelFunc {
+	i.cancelMu.Lock()
+	defer i.cancelMu.Unlock()
+	return i.cancel
 }
 
 type chatTarget struct {
@@ -151,7 +167,13 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 		list = append(list, r.scheduleTool(inst))
 	}
 	ag, err = agent.New(&r.cfg.Config,
-		agent.WithSystemPrompt(prompt.System(inst.ws, r.cfg.DataDir)),
+		agent.WithSystemPrompt(prompt.System(prompt.Info{
+			Workspace: inst.ws,
+			DataDir:   r.cfg.DataDir,
+			Session:   inst.key,
+			Memory:    r.memoryPath(inst.key),
+			Goals:     filepath.Join(inst.ws, "GOALS.md"),
+		})),
 		agent.WithTools(list...),
 	)
 	if err != nil {
@@ -192,6 +214,10 @@ func currentWorkspace(ag *agent.Agent, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+func (r *Runner) memoryPath(key string) string {
+	return filepath.Join(r.cfg.MemoryDir(), bus.KeySlug(key)+".md")
 }
 
 func (r *Runner) saveMapping(key, sessionID, ws string) {

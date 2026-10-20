@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -486,6 +487,24 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
+func cmdCancel(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "用法: ivan cancel <会话键，如 qq:c2c:xxx 或 cli:default>")
+		return 1
+	}
+	cfg, code := loadConfig()
+	if cfg == nil {
+		return code
+	}
+	key := strings.Join(args, " ")
+	if _, err := cli.Call(cfg.SocketPath(), cli.OpCancel, key, 10*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v（取消回合需要 daemon 运行）\n", err)
+		return 1
+	}
+	fmt.Println("已取消会话回合 " + key)
+	return 0
+}
+
 func cmdPause(args []string) int {
 	if len(args) > 0 {
 		fmt.Fprintln(os.Stderr, "用法: ivan pause")
@@ -553,9 +572,14 @@ func printStatus(st daemon.Status) {
 		st.Bus.Outbound, st.Bus.OutboundDropped, st.Bus.OutboundQueued, lastDrop(st.Bus))
 	fmt.Printf("events    written=%d dropped=%d %s\n", st.Events.Written, st.Events.Dropped, st.Events.Dir)
 	fmt.Printf("logs      lines=%d errors=%d %s\n", st.Logs.Lines, st.Logs.Errors, st.Logs.Path)
-	fmt.Printf("runner    turns=%d failures=%d handoffs=%d continued=%d inflight=%d agents=%d/%d sessions=%d concurrent=%d\n",
-		st.Runner.Turns, st.Runner.Failures, st.Runner.Handoffs, st.Runner.Continued,
+	fmt.Printf("runner    turns=%d failures=%d handoffs=%d continued=%d hints=%d inflight=%d agents=%d/%d sessions=%d concurrent=%d\n",
+		st.Runner.Turns, st.Runner.Failures, st.Runner.Handoffs, st.Runner.Continued, st.Runner.Hinted,
 		st.Runner.InFlight, st.Runner.Agents, st.Runner.MaxAgents, st.Runner.Sessions, st.Runner.MaxConcurrent)
+	budget := "不限"
+	if st.Runner.MaxTokensPerDay > 0 {
+		budget = strconv.Itoa(st.Runner.MaxTokensPerDay)
+	}
+	fmt.Printf("budget    tokens_today=%d max_per_day=%s paused=%v\n", st.Runner.TokensToday, budget, st.Runner.Paused)
 	for _, c := range st.Channels {
 		line := fmt.Sprintf("channel   %s running=%v max_len=%d sent=%d failed=%d unmatched=%d",
 			c.Name, c.Running, c.MaxLen, c.Sent, c.Failed, c.Unmatched)
@@ -580,8 +604,8 @@ func printStatus(st daemon.Status) {
 	}
 	if st.Schedule != nil {
 		sch := st.Schedule
-		line := fmt.Sprintf("schedule  jobs=%d enabled=%d running=%d paused=%v triggers=%d failures=%d missed=%d tokens_today=%d",
-			sch.Jobs, sch.Enabled, sch.Running, sch.Paused, sch.Triggers, sch.Failures, sch.Missed, sch.TokensToday)
+		line := fmt.Sprintf("schedule  jobs=%d enabled=%d running=%d paused=%v triggers=%d failures=%d missed=%d",
+			sch.Jobs, sch.Enabled, sch.Running, sch.Paused, sch.Triggers, sch.Failures, sch.Missed)
 		if !sch.NextRunAt.IsZero() {
 			line += " next=" + sch.NextRunAt.Local().Format("01-02 15:04:05")
 		}

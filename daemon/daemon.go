@@ -159,6 +159,7 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		State:  state,
 		Bus:    d.bus,
 		Notify: func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
+		Paused: d.paused,
 	})
 	if err != nil {
 		d.Release()
@@ -167,11 +168,11 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 	d.runner = r
 	if d.jobs != nil {
 		sched, err := schedule.New(d.jobs, schedule.DispatcherFunc(r.TriggerJob), schedule.Config{
-			MissedPolicy:    cfg.Schedule.MissedPolicy,
-			JobTimeout:      cfg.JobTimeout(),
-			MaxTokensPerDay: cfg.Schedule.MaxTokensPerDay,
-			Paused:          d.paused,
-			Eventf:          d.scheduleEvent,
+			MissedPolicy: cfg.Schedule.MissedPolicy,
+			JobTimeout:   cfg.JobTimeout(),
+			Paused:       d.paused,
+			Budget:       r.Budget,
+			Eventf:       d.scheduleEvent,
 		})
 		if err != nil {
 			d.schedErr = err.Error()
@@ -352,6 +353,19 @@ func (d *Daemon) Control(op, arg string) (any, error) {
 			}
 		}()
 		return map[string]string{"id": id, "status": "started"}, nil
+	case cli.OpCancel:
+		if d.runner == nil {
+			return nil, errors.New("runner 未装配")
+		}
+		key := strings.TrimSpace(arg)
+		if key == "" {
+			return nil, errors.New("缺少会话键")
+		}
+		if !d.runner.CancelTurn(key) {
+			return nil, fmt.Errorf("会话没有在跑的回合: %s", key)
+		}
+		_ = d.human.Notice("人工取消会话回合 %s", key)
+		return map[string]string{"session": key, "status": "cancelled"}, nil
 	case cli.OpPause, cli.OpResume:
 		if d.state == nil {
 			return nil, errors.New("缺少状态文件，无法切换暂停开关")

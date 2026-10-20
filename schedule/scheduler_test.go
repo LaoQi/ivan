@@ -3,6 +3,7 @@ package schedule
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -368,8 +369,24 @@ func TestPauseHoldsAtJob(t *testing.T) {
 }
 
 func TestBudgetBlocksAndDefers(t *testing.T) {
-	h := newHarness(t, func(c *Config) { c.MaxTokensPerDay = 10 })
-	h.disp.out = Outcome{Tokens: 10}
+	var mu sync.Mutex
+	tokens := 0
+	h := newHarness(t, func(c *Config) {
+		c.Budget = func() (bool, string) {
+			mu.Lock()
+			defer mu.Unlock()
+			if tokens >= 10 {
+				return false, "当日 token 预算 10 已用尽"
+			}
+			return true, ""
+		}
+	})
+	h.disp.Set(func(context.Context, Trigger) Outcome {
+		mu.Lock()
+		tokens += 10
+		mu.Unlock()
+		return Outcome{Tokens: 10}
+	})
 	first, err := h.sched.Add(everyJob("a", time.Minute))
 	if err != nil {
 		t.Fatalf("Add: %v", err)
@@ -395,8 +412,8 @@ func TestBudgetBlocksAndDefers(t *testing.T) {
 	if got := h.job(first.ID); got.State.NextRunAtMS <= h.clock.Now().UnixMilli() {
 		t.Fatalf("周期作业应跳过而非堆积: %+v", got.State)
 	}
-	if st := h.sched.Status(); st.TokensToday != 10 {
-		t.Fatalf("tokens_today=%d，期望 10", st.TokensToday)
+	if st := h.sched.Status(); !strings.Contains(st.LastError, "预算") {
+		t.Fatalf("状态未反映预算用尽: %+v", st)
 	}
 }
 

@@ -38,6 +38,7 @@ type RunnerConfig struct {
 	AutoContinue        bool    `yaml:"auto_continue"`
 	MaxTurnsPerTask     int     `yaml:"max_turns_per_task"`
 	MaxTokensPerTask    int     `yaml:"max_tokens_per_task"`
+	MaxTokensPerDay     int     `yaml:"max_tokens_per_day"`
 	MaxAgents           int     `yaml:"max_agents"`
 	IdleTimeoutMinutes  int     `yaml:"idle_timeout_minutes"`
 }
@@ -78,7 +79,6 @@ type ScheduleConfig struct {
 	JobsDB            string `yaml:"jobs_db"`
 	MissedPolicy      string `yaml:"missed_policy"`
 	JobTimeoutSeconds int    `yaml:"job_timeout_seconds"`
-	MaxTokensPerDay   int    `yaml:"max_tokens_per_day"`
 }
 
 type Config struct {
@@ -290,6 +290,8 @@ func (c *Config) JobsDBPath() string {
 	}
 	return filepath.Join(c.DataDir, p)
 }
+
+func (c *Config) MemoryDir() string { return filepath.Join(c.DataDir, "memory") }
 
 func (c *Config) JobTimeout() time.Duration {
 	return time.Duration(c.Schedule.JobTimeoutSeconds) * time.Second

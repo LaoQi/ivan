@@ -27,6 +27,7 @@ type Options struct {
 	Bus    *bus.Bus
 	Stream io.Writer
 	Notify func(ctx context.Context, msg bus.OutboundMessage) error
+	Paused func() bool
 }
 
 type Turn struct {
@@ -49,6 +50,8 @@ type Runner struct {
 	failures  atomic.Uint64
 	handoffs  atomic.Uint64
 	continued atomic.Uint64
+	hinted    atomic.Uint64
+	cancelled atomic.Uint64
 	dropped   atomic.Uint64
 	inFlight  atomic.Int64
 	closed    atomic.Bool
@@ -77,6 +80,10 @@ type Status struct {
 	Handoffs        uint64        `json:"handoffs"`
 	Continued       uint64        `json:"continued"`
 	DroppedOutbound uint64        `json:"dropped_outbound"`
+	Hinted          uint64        `json:"hinted"`
+	TokensToday     int           `json:"tokens_today"`
+	MaxTokensPerDay int           `json:"max_tokens_per_day"`
+	Paused          bool          `json:"paused"`
 	InFlight        int64         `json:"in_flight"`
 	Agents          int           `json:"agents"`
 	MaxAgents       int           `json:"max_agents"`
@@ -132,8 +139,18 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 	r.inFlight.Add(1)
 	defer r.inFlight.Add(-1)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	inst.setCancel(cancel)
+	defer func() {
+		cancel()
+		inst.setCancel(nil)
+	}()
+
 	t := &task{r: r, inst: inst, msg: msg, key: key}
-	err := t.run(ctx)
+	err := t.run(runCtx)
+	if n := t.usedTokens(); n > 0 {
+		r.chargeTokens(n)
+	}
 
 	turn := Turn{Tokens: t.usedTokens(), Context: t.contextTokens()}
 	out := bus.OutboundMessage{
@@ -176,6 +193,62 @@ func (r *Runner) deliver(ctx context.Context, msg bus.OutboundMessage) string {
 		return briefErr(err)
 	}
 	return ""
+}
+
+func (r *Runner) CancelTurn(key string) bool {
+	r.poolMu.Lock()
+	inst := r.pool[key]
+	r.poolMu.Unlock()
+	if inst == nil {
+		return false
+	}
+	cancel := inst.cancelFunc()
+	if cancel == nil {
+		return false
+	}
+	r.cancelled.Add(1)
+	cancel()
+	r.note("cancel", key)
+	return true
+}
+
+func (r *Runner) paused() bool {
+	return r.opts.Paused != nil && r.opts.Paused()
+}
+
+func (r *Runner) chargeTokens(n int) {
+	if n <= 0 || r.opts.State == nil {
+		return
+	}
+	if _, err := r.opts.State.AddTokens(n); err != nil {
+		r.notice("写入当日 token 用量失败: %v", err)
+	}
+}
+
+func (r *Runner) TokensToday() int {
+	if r.opts.State == nil {
+		return 0
+	}
+	return r.opts.State.TokensToday()
+}
+
+func (r *Runner) budgetExceeded(extra int) (bool, string) {
+	max := r.cfg.Runner.MaxTokensPerDay
+	if max <= 0 || r.opts.State == nil {
+		return false, ""
+	}
+	used := r.opts.State.TokensToday() + extra
+	if used >= max {
+		return true, fmt.Sprintf("当日 token 预算 %d 已用尽（已用 %d）", max, used)
+	}
+	return false, ""
+}
+
+func (r *Runner) Budget() (bool, string) {
+	if ok, reason := r.budgetExceeded(0); ok {
+		return false, reason
+	}
+	return true, ""
 }
 
 func (r *Runner) SetScheduler(s *schedule.Scheduler) {
@@ -302,6 +375,10 @@ func (r *Runner) Status() Status {
 		Handoffs:        r.handoffs.Load(),
 		Continued:       r.continued.Load(),
 		DroppedOutbound: r.dropped.Load(),
+		Hinted:          r.hinted.Load(),
+		TokensToday:     r.TokensToday(),
+		MaxTokensPerDay: r.cfg.Runner.MaxTokensPerDay,
+		Paused:          r.paused(),
 		InFlight:        r.inFlight.Load(),
 		MaxAgents:       r.cfg.Runner.MaxAgents,
 		MaxConcurrent:   r.cfg.Daemon.MaxConcurrent,
@@ -345,6 +422,13 @@ func (r *Runner) human(e chlog.Event) {
 		e.Time = time.Now()
 	}
 	_ = r.opts.Human.Emit(e)
+}
+
+func (r *Runner) note(kind, text string) {
+	if r.opts.Log == nil {
+		return
+	}
+	r.opts.Log.Note(kind, text)
 }
 
 func (r *Runner) notice(format string, args ...any) {
@@ -393,6 +477,7 @@ func (t *task) run(ctx context.Context) error {
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 		}
 	}()
+	hinted := false
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
 		if err != nil {
@@ -411,26 +496,99 @@ func (t *task) run(ctx context.Context) error {
 			t.r.failures.Add(1)
 			return err
 		}
-		h, ok := ag.TakeHandoff()
-		if !ok {
+		if h, ok := ag.TakeHandoff(); ok {
+			t.r.handoffs.Add(1)
+			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
+			t.r.human(chlog.Event{Kind: "handoff", Session: t.key, Channel: t.msg.Channel, Handoff: true, Text: h.OldID + " → " + h.NewID})
+			t.r.note("handoff", t.key+" "+h.OldID+" → "+h.NewID)
+			if !t.r.cfg.Runner.AutoContinue || !h.Continue {
+				return nil
+			}
+			if t.r.paused() {
+				t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: "暂停中，交接后不自动续跑"})
+				t.r.note("paused", t.key+" 交接后不自动续跑")
+				return nil
+			}
+			if t.stopForBudget(turn) {
+				return nil
+			}
+			t.r.continued.Add(1)
+			continue
+		}
+		if hinted || !t.pressure() {
 			return nil
 		}
-		t.r.handoffs.Add(1)
-		t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
-		t.r.human(chlog.Event{Kind: "handoff", Session: t.key, Channel: t.msg.Channel, Handoff: true, Text: h.OldID + " → " + h.NewID})
-		if !t.r.cfg.Runner.AutoContinue || !h.Continue {
+		if t.r.paused() {
+			t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: "暂停中，跳过上下文阈值交接"})
+			t.r.note("paused", t.key+" 跳过上下文阈值交接")
 			return nil
 		}
-		if max := t.r.cfg.Runner.MaxTurnsPerTask; max > 0 && turn+1 >= max {
-			t.r.human(chlog.Event{Kind: "budget", Session: t.key, Channel: t.msg.Channel, Text: fmt.Sprintf("续跑轮次已达上限 %d，停下等下次消息", max)})
+		if t.stopForBudget(turn) {
 			return nil
 		}
-		if max := t.r.cfg.Runner.MaxTokensPerTask; max > 0 && t.usedTokens() >= max {
-			t.r.human(chlog.Event{Kind: "budget", Session: t.key, Channel: t.msg.Channel, Text: fmt.Sprintf("token 预算已达上限 %d，停下等下次消息", max)})
+		hinted = true
+		if err := ag.AppendNotice(handoffHint); err != nil {
+			t.r.notice("注入交接提示失败 key=%s: %v", t.key, err)
 			return nil
 		}
-		t.r.continued.Add(1)
+		t.r.hinted.Add(1)
+		hint := fmt.Sprintf("上下文 %d tokens 已达阈值 %.0f%%，提示模型交接", t.contextTokens(), thresholdRatio(t.r.cfg)*100)
+		t.r.human(chlog.Event{Kind: "handoff_hint", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: hint})
+		t.r.note("handoff_hint", t.key+" "+hint)
 	}
+}
+
+const handoffHint = "系统提示：本会话上下文已接近窗口上限，请立即调用 next_session 交接进度（summary 写清已完成内容、关键结论与下一步），然后结束本回合。"
+
+func (t *task) stopForBudget(turn int) bool {
+	if max := t.r.cfg.Runner.MaxTurnsPerTask; max > 0 && turn+1 >= max {
+		t.blocked(fmt.Sprintf("续跑轮次已达上限 %d，停下等下次消息", max))
+		return true
+	}
+	if max := t.r.cfg.Runner.MaxTokensPerTask; max > 0 && t.usedTokens() >= max {
+		t.blocked(fmt.Sprintf("token 预算已达上限 %d，停下等下次消息", max))
+		return true
+	}
+	if exceeded, reason := t.r.budgetExceeded(t.usedTokens()); exceeded {
+		t.blocked(reason + "，停下等下次消息")
+		return true
+	}
+	return false
+}
+
+func (t *task) blocked(text string) {
+	t.r.human(chlog.Event{Kind: "budget", Session: t.key, Channel: t.msg.Channel, Text: text})
+	t.r.note("budget", t.key+" "+text)
+}
+
+func thresholdRatio(cfg *config.Config) float64 {
+	ratio := cfg.Runner.HandoffThreshold
+	if ratio <= 0 || ratio > 1 {
+		return 0.7
+	}
+	return ratio
+}
+
+func (t *task) pressure() bool {
+	window := t.r.cfg.Runner.ContextWindowTokens
+	if window <= 0 {
+		return false
+	}
+	used := t.contextTokens()
+	if used <= 0 {
+		if ag := t.inst.ag; ag != nil {
+			st := ag.Stats()
+			if st.HasContext {
+				used = st.ContextTokens
+			} else {
+				used = st.Est
+			}
+		}
+	}
+	if used <= 0 {
+		return false
+	}
+	return float64(used) >= float64(window)*thresholdRatio(t.r.cfg)
 }
 
 func (t *task) sink(e agent.Event) {

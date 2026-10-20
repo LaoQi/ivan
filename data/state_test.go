@@ -105,3 +105,36 @@ func TestStateMappingTimestamps(t *testing.T) {
 		t.Fatal("Snapshot 应返回副本")
 	}
 }
+
+func TestUsageTokensToday(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := st.TokensToday(); got != 0 {
+		t.Fatalf("初始用量 %d，期望 0", got)
+	}
+	if n, err := st.AddTokens(120); err != nil || n != 120 {
+		t.Fatalf("AddTokens: n=%d err=%v", n, err)
+	}
+	if n, _ := st.AddTokens(30); n != 150 {
+		t.Fatalf("累加后 %d，期望 150", n)
+	}
+	again, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	if got := again.TokensToday(); got != 150 {
+		t.Fatalf("重启后用量 %d，期望 150", got)
+	}
+	stale := again.doc.Usage
+	stale.Date = "2000-01-01"
+	again.doc.Usage = stale
+	if got := again.TokensToday(); got != 0 {
+		t.Fatalf("跨日应清零，得到 %d", got)
+	}
+	if n, _ := again.AddTokens(10); n != 10 {
+		t.Fatalf("跨日后重新累计 %d，期望 10", n)
+	}
+}

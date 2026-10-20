@@ -18,10 +18,16 @@ type SessionState struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
+type Usage struct {
+	Date   string `json:"date,omitempty"`
+	Tokens int    `json:"tokens,omitempty"`
+}
+
 type stateDoc struct {
 	Version   int                     `json:"version"`
 	UpdatedAt time.Time               `json:"updated_at,omitempty"`
 	Paused    bool                    `json:"paused,omitempty"`
+	Usage     Usage                   `json:"usage,omitempty"`
 	Sessions  map[string]SessionState `json:"sessions"`
 }
 
@@ -102,6 +108,31 @@ func (s *State) SetPaused(v bool) error {
 	s.doc.Paused = v
 	return s.flushLocked()
 }
+
+func (s *State) TokensToday() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.doc.Usage.Date != usageDay() {
+		return 0
+	}
+	return s.doc.Usage.Tokens
+}
+
+func (s *State) AddTokens(n int) (int, error) {
+	if n <= 0 {
+		return s.TokensToday(), nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	day := usageDay()
+	if s.doc.Usage.Date != day {
+		s.doc.Usage = Usage{Date: day}
+	}
+	s.doc.Usage.Tokens += n
+	return s.doc.Usage.Tokens, s.flushLocked()
+}
+
+func usageDay() string { return time.Now().Format("2006-01-02") }
 
 func (s *State) Len() int {
 	s.mu.Lock()

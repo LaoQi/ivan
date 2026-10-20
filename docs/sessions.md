@@ -1,6 +1,6 @@
 # 会话模型与推进策略
 
-> 状态：**P1 已实现**（会话键→实例池、映射持久化、回合驱动、重启恢复）。目标：会话连续、长任务能自主推进、并发可控可恢复；实现记录见 §9。
+> 状态：**P1 已实现**（会话键→实例池、映射持久化、回合驱动、重启恢复）；**P4 已实现**（上下文阈值自动交接、跨进程日预算、暂停开关、记忆/目标按需读取、`ivan cancel`）。目标：会话连续、长任务能自主推进、并发可控可恢复；实现记录见 §9（P1）与 §10（P4）。
 
 ## 1 会话键 → agent 实例
 
@@ -33,9 +33,10 @@ Inbound → runner.dispatch(msg)
 
 1. 聚合本轮文本 → `OutboundMessage{ReplyTo: inbound.MessageID}` → Bus（回到来源渠道）。
 2. `TakeHandoff()`：若有交接 → 更新 `state.json` 的 session 映射 → 若 `Continue` 则立即 `agent.Continue(ctx, sink)` 继续跑（这就是长任务跨会话推进）。
-3. 上下文压力：tanya 没有"模型窗口"概念（`Stats.ContextTokens` 是上次请求 prompt tokens、`Stats.Est` 是本地估算），故 **ivan 侧新增配置** `context_window_tokens` 与 `handoff_threshold`（默认 0.7）；`Stats.Est` 或 `EventResponse.ContextTokens` 超阈值且本轮未交接 → 注入一条"请调用 next_session 交接"的 user 消息触发交接（下一轮生效）。
-4. 预算：累计 token/时长/续跑轮次超限 → 停止推进，落事件并（可选）通知人。
-5. 失败：回合错误 → 记事件、按策略重试（有限次）、必要时回一条错误摘要到来源渠道。
+3. 上下文压力（**已实现**）：`context_window_tokens` × `handoff_threshold`（默认 0.7）为阈值；本回合**没交接**且 `ContextTokens`（上次请求的 prompt tokens，缺失则用 `Stats.Est`）超阈值 → `AppendNotice` 注入一条"请调用 next_session 交接"的 user 消息并 `Continue` 一轮（**每任务只注入一次**，不受 `auto_continue` 限制——它属于安全阀，且同样受暂停与预算闸门）。
+4. 预算（**已实现**）：`max_turns_per_task`（续跑轮次）、`max_tokens_per_task`（单任务）、`max_tokens_per_day`（**全局日预算**，含用户消息/定时作业/续跑，按本地日累计在 `state.json`，跨进程生效）任一超限 → 停止推进，落 `budget` 事件后安静停下。
+5. 失败：回合错误 → 记事件、回错误摘要到来源渠道（**不做**自动重试：重试会把无人值守的成本放大）。
+6. 暂停（`state.json: paused`，`ivan pause/resume`）只挡**无人值守路径**：定时作业触发、交接后自动续跑、阈值交接提示；用户主动发来的消息照常处理（人在场时不该被挡住）。
 
 **自主推进是受控能力**（配置项 `auto_continue`，**默认关**）：开启后单次 inbound 触发的自动续跑轮次有上限（默认 8 轮），并受 `max_tokens_per_task` / `max_duration_per_task` 约束；超限即停下并把状态写进会话（下次人工/定时消息可继续）。建议只在指定工作区（低风险、只读或报告类任务）启用。
 
@@ -45,7 +46,7 @@ Inbound → runner.dispatch(msg)
 
 - 同 SessionKey 串行；跨 SessionKey 并发上限可配（默认 2）。
 - 会话忙碌时到达的新消息：默认**排队**（每会话队列上限，如 8），超限丢弃并回一条"忙"提示。
-- 运行中任务的取消：`ivan cancel <session>` 走 socket → 取消该会话当前 `context`（agent 支持 ctx 取消，`run_shell` 子进程按 tanya 既有语义处理）。
+- 运行中任务的取消（**已实现**）：`ivan cancel <会话键>` 走 socket → `runner.CancelTurn(key)` 取消该会话当前回合的 ctx（agent 支持 ctx 取消，`run_shell` 子进程按 tanya 既有语义处理）；没有在跑的回合时明确报错。
 - 停机：SIGTERM → 停止入站 → 等在跑回合收尾（超时则取消）→ 刷出站 → 落状态。
 
 ## 6 重启恢复
@@ -53,11 +54,12 @@ Inbound → runner.dispatch(msg)
 - 未完成的回合在崩溃后**不自动续跑**（避免半截状态的副作用重复执行）；启动时把相关会话标记为 `interrupted` 并落事件，等下一次消息自然继续（会话历史本身是完整的 append-only 文件）。
 - 队列不持久化（首期）；重启丢队列里的待处理消息，但来源通道的消息本身仍在平台上，用户可重发。
 
-## 7 记忆与目标（P4）
+## 7 记忆与目标（P4 已实现：按需读取）
 
-- 记忆：`data/memory/<session>.md`（或其他约定文件），由 `remember` 工具追加；每轮注入为 user 消息（不动 system prompt，保 prompt cache 不变性）。
-- 目标：workspace 内 `GOALS.md`/`TODO.md` 的轻量约定，人在场可编辑，agent 每轮读取自己推进；心跳自省（后置）在空闲时据此唤醒。
-- 注入内容有长度上限与去重（同一片段不重复注入），避免上下文被记忆吃掉。
+- 记忆：`<data_dir>/memory/<key-slug>.md`（每个会话键一份）。**不做每轮注入**：路径写进实例的 system prompt（静态字符串，保 prompt cache 不变性），模型需要背景时自己 `run_shell` 读取、有新结论时追加一条带日期的要点。
+- 目标：会话工作区内的 `GOALS.md`，人在场可编辑，路径同样进 system prompt；模型按它推进、完成项自行打勾，不替人删未确认条目。
+- 为什么不做注入/工具：注入会吃掉上下文并破坏缓存，专用 `remember` 工具只省一次 shell 调用却多一份维护面；shell + 路径约定足够，且人可以直接编辑同一批文件。
+- 记忆文件不自动创建/裁剪（首期）：避免长歪的自动摘要污染；需要时由人清理。
 
 ## 8 验收
 
@@ -65,6 +67,7 @@ Inbound → runner.dispatch(msg)
 - 一个多步任务被单条消息触发后，`next_session` 交接 + 自动续跑完成，事件日志里能看到会话 id 的切换。
 - 上下文超过阈值时自动交接，不出现"上下文超限"报错。
 - 自动续跑轮次/预算超限时安静停下并留下可见状态。
+- （P4 验收）在指定工作区开启 `auto_continue` 后，单条消息能跨会话推进，且被轮次/日预算/暂停三处闸门约束住；上下文接近窗口时自动提示交接，不出现超限报错。
 
 ## 9 P1 实现记录（2026-10-10）
 
@@ -78,3 +81,15 @@ Inbound → runner.dispatch(msg)
 6. **交接**：`TakeHandoff()` → 立即更新映射。`auto_continue`（默认**关**）开启时才 `Continue`，且受 `max_turns_per_task` 与 `max_tokens_per_task`（0=不限）双重熔断，超限落 `budget` 日志后安静停下。
 7. **重启恢复**：映射恢复走 `LoadSession`；映射存在但会话文件丢失（`SessionDir` 下找不到）时回退新建并记 warn + 清映射。**未做**：崩溃后回合的 `interrupted` 标记（P4 与暂停开关一起）。
 8. **仍待办（P4）**：上下文阈值自动交接（`context_window_tokens`/`handoff_threshold` 已进配置但未接线）、跨 handoff 的预算累计（tanya `Stats` 在交接后 reset）、`ivan cancel <session>`。
+
+## 10 P4 实现记录（2026-10-20）
+
+代码：`runner/runner.go`（阈值交接提示、预算/暂停闸门、`CancelTurn`、`Budget`）、`runner/pool.go`（实例回合取消、记忆/目标路径进 prompt）、`prompt/`（`Info` 结构 + 记忆/目标段）、`data/state.go`（`usage` 日累计）、`config`（`runner.max_tokens_per_day`、`MemoryDir`）、`daemon`（暂停/预算接线、`cancel` 控制指令）、`commands.go`（`ivan cancel`、status 的 budget 行）。
+
+1. **阈值自动交接**：`task.pressure()` 用 `ContextTokens`（缺失回退 `Stats.ContextTokens`/`Est`）与 `context_window_tokens × handoff_threshold` 比较；超阈值且本回合无交接 → `AppendNotice(handoffHint)` + `Continue`，每任务一次（`hinted` 标记），事件落 `handoff_hint`。`auto_continue` 关时只多做这一轮（把上下文安全地交出去），交接后仍不续跑。
+2. **预算熔断**（三处闸门 + 一处持久化）：`max_turns_per_task` / `max_tokens_per_task` / `max_tokens_per_day`，前两者按任务、后者按**本地日**；日用量由 `data.State` 的 `usage{date,tokens}` 记录（原子写，随 `state.json`），`DispatchTurn` 结束时由 `runner.chargeTokens` 累加，`runner.Budget()` 对外暴露给调度器。调度器不再自带计数器（P3 的 `schedule.max_tokens_per_day` 已删除，统一到 runner，避免两个预算口径）。
+3. **暂停开关语义**：`paused` 只挡无人值守路径（定时作业、交接续跑、阈值交接提示），用户消息照常处理；事件分别记 `paused`（runner）与 `job_paused`（调度器）。
+4. **取消**：实例持当前回合 `context.CancelFunc`，`CancelTurn(key)` 取消并返回是否有在跑回合；`ivan cancel <会话键>` 经 socket 调用。
+5. **记忆/目标**：`prompt.Info{Workspace,DataDir,Session,Memory,Goals}`；记忆路径 `<data_dir>/memory/<key-slug>.md`、目标 `<workspace>/GOALS.md`；`system_prompt.md` 增"记忆与目标"行为约定（按需读、一行一条追加、不删未确认条目）。
+6. **测试**：`runner/p4_test.go`（阈值提示注入到第二轮且首轮不带、每任务只提示一次、未超阈值不提示、暂停不提示、暂停不续跑、正常续跑、日预算停续跑 + 跨进程累计、`CancelTurn` 真取消 httptest 阻塞请求、系统提示含记忆/目标路径）、`data`（日用量累加/跨日清零/重启保留）、`daemon`（`cancel` 参数与空闲报错、`pause/resume` 反映到 `status.runner.paused`）。
+7. **仍待办**：崩溃后回合的 `interrupted` 标记（需要回合级落盘，随 P5 一起）、记忆文件自动裁剪、按会话的工作区白名单（目前"指定低风险工作区"靠人配置 `data_dir`/工作区路径约定）。

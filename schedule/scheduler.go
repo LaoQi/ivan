@@ -67,12 +67,12 @@ type Event struct {
 }
 
 type Config struct {
-	MissedPolicy    string
-	JobTimeout      time.Duration
-	MaxTokensPerDay int
-	Paused          func() bool
-	Now             func() time.Time
-	Eventf          func(Event)
+	MissedPolicy string
+	JobTimeout   time.Duration
+	Paused       func() bool
+	Budget       func() (bool, string)
+	Now          func() time.Time
+	Eventf       func(Event)
 }
 
 type Status struct {
@@ -84,7 +84,6 @@ type Status struct {
 	Triggers    uint64    `json:"triggers"`
 	Failures    uint64    `json:"failures"`
 	Missed      uint64    `json:"missed"`
-	TokensToday int       `json:"tokens_today"`
 	LastError   string    `json:"last_error,omitempty"`
 	LastErrorAt time.Time `json:"last_error_at,omitempty"`
 }
@@ -104,8 +103,6 @@ type Scheduler struct {
 	triggers  uint64
 	failures  uint64
 	missed    uint64
-	tokens    int
-	day       string
 	lastErr   string
 	lastErrAt time.Time
 }
@@ -265,14 +262,7 @@ func (s *Scheduler) plan() ([]Job, time.Duration, error) {
 		return nil, 0, err
 	}
 	nowMS := s.nowMS()
-	paused := s.paused()
-	budget := s.budgetBlocked()
-	blocked := ""
-	if paused {
-		blocked = "暂停中"
-	} else if budget {
-		blocked = fmt.Sprintf("当日 token 预算 %d 已用尽", s.cfg.MaxTokensPerDay)
-	}
+	blocked := s.blockedReason()
 	var (
 		due  []Job
 		next int64
@@ -425,12 +415,6 @@ func (s *Scheduler) finish(base Job, planned int64, out Outcome, dur time.Durati
 	if out.Err != nil {
 		s.fail(out.Err, EventFailed, fmt.Sprintf("作业执行失败 job=%s", cur.Label()))
 	} else {
-		s.mu.Lock()
-		s.tokens += out.Tokens
-		if out.Tokens > 0 {
-			s.day = now.UTC().Format("2006-01-02")
-		}
-		s.mu.Unlock()
 		text := fmt.Sprintf("完成 runs=%d tokens=%d 耗时 %s", cur.State.Runs, out.Tokens, dur.Round(time.Second))
 		if manual {
 			text += "（手动触发）"
@@ -551,7 +535,6 @@ func (s *Scheduler) Status() Status {
 	st.Failures = s.failures
 	st.Missed = s.missed
 	st.Running = len(s.running)
-	st.TokensToday = s.tokens
 	st.LastError = s.lastErr
 	st.LastErrorAt = s.lastErrAt
 	s.mu.Unlock()
@@ -577,8 +560,8 @@ func (s *Scheduler) Status() Status {
 	if next > 0 {
 		st.NextRunAt = FromMS(next)
 	}
-	if s.budgetBlocked() {
-		st.LastError = fmt.Sprintf("当日 token 预算 %d 已用尽", s.cfg.MaxTokensPerDay)
+	if allow, reason := s.budget(); !allow {
+		st.LastError = reason
 		st.LastErrorAt = s.now()
 	}
 	return st
@@ -586,18 +569,25 @@ func (s *Scheduler) Status() Status {
 
 func (s *Scheduler) paused() bool { return s.cfg.Paused != nil && s.cfg.Paused() }
 
-func (s *Scheduler) budgetBlocked() bool {
-	if s.cfg.MaxTokensPerDay <= 0 {
-		return false
+func (s *Scheduler) blockedReason() string {
+	if s.paused() {
+		return "暂停中"
 	}
-	day := s.now().UTC().Format("2006-01-02")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.day != day {
-		s.day = day
-		s.tokens = 0
+	if allow, reason := s.budget(); !allow {
+		return reason
 	}
-	return s.tokens >= s.cfg.MaxTokensPerDay
+	return ""
+}
+
+func (s *Scheduler) budget() (bool, string) {
+	if s.cfg.Budget == nil {
+		return true, ""
+	}
+	allow, reason := s.cfg.Budget()
+	if !allow && strings.TrimSpace(reason) == "" {
+		reason = "预算已用尽"
+	}
+	return allow, reason
 }
 
 func (s *Scheduler) inFlight(id string) bool {

@@ -13,7 +13,7 @@ image_max_bytes: 10485760
 image_resize: true
 # 出站 User-Agent，默认 ivan/<版本> (+https://github.com/LaoQi/ivan)
 # user_agent: ivan/dev (+https://github.com/LaoQi/ivan)
-# 数据目录（与 tanya 分离；会话落于 <data_dir>/workspaces/<ws-id>/sessions/）
+# 数据目录（与 tanya 分离；会话落于 <data_dir>/agents/<会话键>/，记忆落 <data_dir>/memory/）
 data_dir: ~/.local/share/ivan
 # 会话存储模式：auto / local / global（默认 global，会话集中在 data_dir）
 session_mode: global
@@ -28,12 +28,15 @@ runner:
   context_window_tokens: 128000
   # 交接阈值：本地估算上下文 / 窗口 超过该比例时提示模型交接
   handoff_threshold: 0.7
-  # 自动续跑（默认关）：开启后单条消息触发的任务可在交接后自行继续
+  # 自动续跑（默认关）：开启后单条消息触发的任务可在交接后自行继续；
+  # 受 max_turns_per_task / max_tokens_per_task / max_tokens_per_day 与 ivan pause 约束
   auto_continue: false
   # 单任务自动续跑轮次上限
   max_turns_per_task: 8
   # 单任务 token 预算（0 = 不限）
   max_tokens_per_task: 0
+  # 当日 token 预算（0 = 不限；含定时作业与自动续跑，落 state.json 跨重启累计）
+  max_tokens_per_day: 0
   # 会话实例池上限（超出时淘汰最久未用的空闲实例）
   max_agents: 8
   # 空闲实例回收时间（分钟）
@@ -62,8 +65,6 @@ schedule:
   missed_policy: run
   # 单次作业执行超时（秒），超时取消该回合并记失败
   job_timeout_seconds: 900
-  # 作业回合的每日 token 预算（0 = 不限；当天用尽后跳过触发并记事件）
-  max_tokens_per_day: 0
 
 channels:
   # 本地 cli 通道（unix socket，ivan send/status 用它）
