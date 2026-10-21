@@ -687,3 +687,25 @@ func TestMarkdownRejectedClassification(t *testing.T) {
 		t.Fatal("窗口过期不应算 markdown 被拒")
 	}
 }
+
+func TestMarkdownSentCounter(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+	ctx := context.Background()
+	if c.Stats().MarkdownSent != 0 {
+		t.Fatal("初始 markdown 计数应为 0")
+	}
+	if _, err := c.SendMarkdown(ctx, Target{UserOpenID: "u-1"}, "## 标题", "m-1", 1); err != nil {
+		t.Fatalf("SendMarkdown: %v", err)
+	}
+	if got := c.Stats().MarkdownSent; got != 1 {
+		t.Fatalf("markdown 发送后应计 1，得到 %d", got)
+	}
+	if _, err := c.SendText(ctx, Target{UserOpenID: "u-1"}, "纯文本", "m-1", 2); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	if got := c.Stats().MarkdownSent; got != 1 {
+		t.Fatalf("文本发送不应计入 markdown，得到 %d", got)
+	}
+}

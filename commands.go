@@ -619,8 +619,8 @@ func printStatus(st daemon.Status) {
 		fmt.Println(line)
 	}
 	if st.QQ.Connected || st.QQ.Messages > 0 || st.QQ.SessionID != "" {
-		line := fmt.Sprintf("qq        connected=%v messages=%d duplicates=%d reconnects=%d sent=%d send_errors=%d",
-			st.QQ.Connected, st.QQ.Messages, st.QQ.Duplicates, st.QQ.Reconnects, st.QQ.Sent, st.QQ.SendErrors)
+		line := fmt.Sprintf("qq        connected=%v messages=%d duplicates=%d reconnects=%d sent=%d md=%d send_errors=%d",
+			st.QQ.Connected, st.QQ.Messages, st.QQ.Duplicates, st.QQ.Reconnects, st.QQ.Sent, st.QQ.MarkdownSent, st.QQ.SendErrors)
 		if st.QQ.SessionID != "" {
 			line += fmt.Sprintf(" session=%s", st.QQ.SessionID)
 		}

@@ -68,6 +68,9 @@ func (c *Client) OpenStream(ctx context.Context, target Target, text, contentTyp
 	if err := s.send(ctx, text, InputStateGenerating, InputModeReplace); err != nil {
 		return nil, err
 	}
+	if s.ctype == ContentTypeMarkdown {
+		c.countMarkdown()
+	}
 	return s, nil
 }
 

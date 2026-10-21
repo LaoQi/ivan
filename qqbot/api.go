@@ -106,7 +106,11 @@ func (c *Client) SendMarkdown(ctx context.Context, target Target, markdown strin
 		"msg_id":   replyTo,
 		"msg_seq":  seq,
 	}
-	return c.sendMessage(ctx, target, data)
+	out, err := c.sendMessage(ctx, target, data)
+	if err == nil {
+		c.countMarkdown()
+	}
+	return out, err
 }
 
 func (c *Client) SendImage(ctx context.Context, target Target, fileInfo string, replyTo string, seq int) (string, error) {

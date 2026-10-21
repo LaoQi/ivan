@@ -16,6 +16,7 @@ type Stats struct {
 	Duplicates    uint64    `json:"duplicates"`
 	Reconnects    uint64    `json:"reconnects"`
 	Sent          uint64    `json:"sent"`
+	MarkdownSent  uint64    `json:"markdown_sent,omitempty"`
 	SendErrors    uint64    `json:"send_errors"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastErrorAt   time.Time `json:"last_error_at,omitempty"`
@@ -41,6 +42,7 @@ type Client struct {
 	messages   atomic.Uint64
 	duplicates atomic.Uint64
 	sent       atomic.Uint64
+	markdown   atomic.Uint64
 	sendErrors atomic.Uint64
 
 	cancel context.CancelFunc
@@ -135,6 +137,7 @@ func (c *Client) Stats() Stats {
 		Duplicates:    c.duplicates.Load(),
 		Reconnects:    c.reconnects.Load(),
 		Sent:          c.sent.Load(),
+		MarkdownSent:  c.markdown.Load(),
 		SendErrors:    c.sendErrors.Load(),
 		LastHeartbeat: lastAck,
 	}
@@ -146,6 +149,7 @@ func (c *Client) Stats() Stats {
 }
 
 func (c *Client) countSent()      { c.sent.Add(1) }
+func (c *Client) countMarkdown()  { c.markdown.Add(1) }
 func (c *Client) countSendErr()   { c.sendErrors.Add(1) }
 func (c *Client) countMessage()   { c.messages.Add(1) }
 func (c *Client) countDuplicate() { c.duplicates.Add(1) }

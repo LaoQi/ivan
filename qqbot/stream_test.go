@@ -175,3 +175,24 @@ func TestOpenStreamContentTypeDefaultsToText(t *testing.T) {
 		t.Fatalf("空 content_type 应收敛为 text，得到 %q", rec.chunks[0].ContentType)
 	}
 }
+
+func TestOpenStreamMarkdownCountsAsMarkdown(t *testing.T) {
+	rec := &streamRecorder{}
+	srv := newStreamServer(t, rec)
+	c := newStreamClient(t, srv)
+	if _, err := c.OpenStream(context.Background(), Target{UserOpenID: "u1"}, "# 标题", ContentTypeMarkdown, "m-1", 1); err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if got := c.Stats().MarkdownSent; got != 1 {
+		t.Fatalf("markdown 流式应计入 markdown 计数，得到 %d", got)
+	}
+	rec2 := &streamRecorder{}
+	srv2 := newStreamServer(t, rec2)
+	c2 := newStreamClient(t, srv2)
+	if _, err := c2.OpenStream(context.Background(), Target{UserOpenID: "u1"}, "纯文本", ContentTypeText, "m-1", 1); err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if got := c2.Stats().MarkdownSent; got != 0 {
+		t.Fatalf("text 流式不应计入 markdown，得到 %d", got)
+	}
+}
