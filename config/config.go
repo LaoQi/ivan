@@ -79,6 +79,7 @@ type QQConfig struct {
 	AllowFrom       []string `yaml:"allow_from"`
 	AllowGroups     []string `yaml:"allow_groups"`
 	MaxMessageLen   int      `yaml:"max_message_len"`
+	Markdown        bool     `yaml:"markdown"`
 	Stream          bool     `yaml:"stream"`
 	StreamMaxLen    int      `yaml:"stream_max_len"`
 	Typing          bool     `yaml:"typing"`
@@ -152,7 +153,7 @@ func Default() *Config {
 		Channels: ChannelsConfig{
 			CLI: CLIConfig{Enabled: true, Stream: true},
 			QQ: QQConfig{
-				MaxMessageLen: 1200, Stream: true, StreamMaxLen: 1200, Typing: true,
+				MaxMessageLen: 1200, Markdown: true, Stream: true, StreamMaxLen: 1200, Typing: true,
 				ReconnectMaxSec: 60,
 			},
 		},

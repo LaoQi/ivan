@@ -126,6 +126,7 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			AllowFrom:      cfg.Channels.QQ.AllowFrom,
 			AllowGroups:    cfg.Channels.QQ.AllowGroups,
 			MaxMessageLen:  cfg.Channels.QQ.MaxMessageLen,
+			Markdown:       cfg.Channels.QQ.Markdown,
 			StreamMaxLen:   cfg.Channels.QQ.StreamMaxLen,
 			Stream:         cfg.Channels.QQ.Stream,
 			Typing:         cfg.Channels.QQ.Typing,

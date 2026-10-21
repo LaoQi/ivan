@@ -297,7 +297,7 @@ func (m *Manager) sendPlain(base context.Context, name string, c Channel, msg bu
 	dctx, cancel := context.WithTimeout(base, m.sendTimeout)
 	defer cancel()
 	var firstErr error
-	for _, part := range Split(Sanitize(text), st.maxLen) {
+	for _, part := range m.split(c, Sanitize(text), st.maxLen) {
 		out.Content = part
 		err := m.deliver(dctx, c, out)
 		switch {

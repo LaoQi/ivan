@@ -34,6 +34,12 @@ type StreamLimit interface {
 	StreamMaxLen() int
 }
 
+// Splitter 是通道的可选能力：按通道语义切分长文本（如 markdown 感知切分、补闭合围栏）。
+// 未实现时走通用切分器 Split。
+type Splitter interface {
+	SplitOutbound(text string) []string
+}
+
 type Status struct {
 	Name        string    `json:"name"`
 	Running     bool      `json:"running"`
@@ -232,7 +238,7 @@ func (m *Manager) Route(ctx context.Context, msg bus.OutboundMessage) error {
 	if msg.IsStreamUpdate() {
 		return m.routeStream(ctx, name, c, msg)
 	}
-	parts := Split(Sanitize(msg.Content), st.maxLen)
+	parts := m.split(c, Sanitize(msg.Content), st.maxLen)
 	var (
 		firstErr error
 		failed   int
@@ -262,6 +268,16 @@ func (m *Manager) Route(ctx context.Context, msg bus.OutboundMessage) error {
 		return firstErr
 	}
 	return nil
+}
+
+// split 按通道能力切分文本：声明 Splitter 的通道自行决定边界，否则走通用切分器。
+func (m *Manager) split(c Channel, text string, maxLen int) []string {
+	if sp, ok := c.(Splitter); ok {
+		if parts := sp.SplitOutbound(text); len(parts) > 0 {
+			return parts
+		}
+	}
+	return Split(text, maxLen)
 }
 
 func (m *Manager) deliver(ctx context.Context, c Channel, msg bus.OutboundMessage) error {

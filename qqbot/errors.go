@@ -84,9 +84,30 @@ func (e *Error) WindowExpired() bool {
 	return e.Code == ErrCodeMsgExpired
 }
 
+// MarkdownRejected 表示平台以「markdown 内容不可用」为由拒收，调用方应退回纯文本重发。
+func (e *Error) MarkdownRejected() bool {
+	_, ok := markdownCodes[e.Code]
+	return ok
+}
+
 const (
 	ErrCodeMsgExpired = 40034005
 )
+
+// markdown 内容类错误码：官方文档列出的「无效/不允许的 markdown 内容」与
+// 模板参数类错误。命中说明该条内容不能以 msg_type=2 投递，调用方应退回纯文本。
+var markdownCodes = map[int]struct{}{
+	40034008: {}, // markdown 参数有空值
+	40034009: {}, // markdown 参数有换行符
+	40034010: {}, // 模板参数中不能含有 markdown 语法
+	40034011: {}, // 无效的 markdown 内容
+	40034124: {}, // markdown 消息参数错误
+	40034127: {}, // 无 markdown 模板权限
+	304036:   {}, // 无 Markdown 模板权限
+	50055:    {}, // 无效的 markdown content
+	50056:    {}, // 不允许发送 markdown content
+	50057:    {}, // markdown 参数只支持原生语法或模板二选一
+}
 
 func errorFromResponse(op string, status int, body []byte) *Error {
 	e := &Error{Status: status, Op: op}
@@ -194,4 +215,9 @@ func IsRetryable(err error) bool {
 func IsAuthFailed(err error) bool {
 	var e *Error
 	return errors.As(err, &e) && e.AuthFailed()
+}
+
+func IsMarkdownRejected(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.MarkdownRejected()
 }

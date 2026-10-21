@@ -17,11 +17,12 @@ import (
 )
 
 type fakeAPI struct {
-	srv   *httptest.Server
-	mu    sync.Mutex
-	sent  []map[string]any
-	paths []string
-	auth  []string
+	srv          *httptest.Server
+	mu           sync.Mutex
+	sent         []map[string]any
+	paths        []string
+	auth         []string
+	failMarkdown bool
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -44,7 +45,15 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	f.sent = append(f.sent, body)
 	f.paths = append(f.paths, r.URL.Path)
 	f.auth = append(f.auth, r.Header.Get("Authorization"))
+	failMD := f.failMarkdown
 	f.mu.Unlock()
+	if failMD {
+		if mt, _ := body["msg_type"].(float64); int(mt) == qqbot.MsgTypeMarkdown {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"err_code":40034011,"message":"无效的markdown内容"}`))
+			return
+		}
+	}
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/files"):
 		_, _ = w.Write([]byte(`{"file_uuid":"fu-1","file_info":"fi-1","ttl":3600}`))
@@ -479,5 +488,163 @@ func TestStreamMaxLenDefault(t *testing.T) {
 	ch := newTestChannel(t, f, nil)
 	if got := ch.StreamMaxLen(); got != DefaultStreamLen {
 		t.Fatalf("StreamMaxLen=%d，期望 %d", got, DefaultStreamLen)
+	}
+}
+
+func TestSendMarkdownWhenEnabled(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if err := ch.Send(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1",
+		Content: "## 结论\n\n- 第一点\n- 第二点\n",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	calls := f.calls()
+	if len(calls) != 1 {
+		t.Fatalf("期望 1 次调用，得到 %d", len(calls))
+	}
+	if mt, _ := calls[0]["msg_type"].(float64); int(mt) != qqbot.MsgTypeMarkdown {
+		t.Fatalf("应走 markdown，msg_type=%v", calls[0]["msg_type"])
+	}
+	if _, ok := calls[0]["content"]; ok {
+		t.Fatalf("markdown 消息不应带 content: %+v", calls[0])
+	}
+	md, _ := calls[0]["markdown"].(map[string]any)
+	if md == nil || !strings.Contains(md["content"].(string), "## 结论") {
+		t.Fatalf("markdown 内容错误: %+v", calls[0]["markdown"])
+	}
+}
+
+func TestSendPlainWhenNoMarkdownSyntax(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if err := ch.Send(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "纯文本回复，没有语法",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if mt, _ := f.calls()[0]["msg_type"].(float64); int(mt) != qqbot.MsgTypeText {
+		t.Fatalf("纯文本应走 msg_type=0，得到 %v", f.calls()[0]["msg_type"])
+	}
+}
+
+func TestSendMarkdownDisabledFallsBackToText(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = false })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if err := ch.Send(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "## 标题",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if mt, _ := f.calls()[0]["msg_type"].(float64); int(mt) != qqbot.MsgTypeText {
+		t.Fatalf("关闭 markdown 后应走文本，得到 %v", f.calls()[0]["msg_type"])
+	}
+}
+
+func TestSendMarkdownRejectedRetriesAsText(t *testing.T) {
+	f := newFakeAPI(t)
+	f.failMarkdown = true
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if err := ch.Send(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "**加粗** 内容",
+	}); err != nil {
+		t.Fatalf("markdown 被拒后应退回文本且不报错: %v", err)
+	}
+	calls := f.calls()
+	if len(calls) != 2 {
+		t.Fatalf("期望 markdown + 文本两次调用，得到 %d", len(calls))
+	}
+	if mt, _ := calls[0]["msg_type"].(float64); int(mt) != qqbot.MsgTypeMarkdown {
+		t.Fatalf("第一次应为 markdown，得到 %v", calls[0]["msg_type"])
+	}
+	if mt, _ := calls[1]["msg_type"].(float64); int(mt) != qqbot.MsgTypeText {
+		t.Fatalf("第二次应退回文本，得到 %v", calls[1]["msg_type"])
+	}
+	if s1, _ := calls[0]["msg_seq"].(float64); int(s1) != 1 {
+		t.Fatalf("首次序号应为 1，得到 %v", calls[0]["msg_seq"])
+	}
+	if s2, _ := calls[1]["msg_seq"].(float64); int(s2) != 2 {
+		t.Fatalf("退回重发应用下一个序号，得到 %v", calls[1]["msg_seq"])
+	}
+}
+
+func TestStreamOpenUsesMarkdownContentType(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.Stream = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if _, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "1. 第一点\n2. 第二点",
+	}); err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	body := f.calls()[0]
+	if ct, _ := body["content_type"].(string); ct != qqbot.ContentTypeMarkdown {
+		t.Fatalf("流式应声明 markdown，得到 %q", body["content_type"])
+	}
+}
+
+func TestSplitOutboundMarkdownClosesFence(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.MaxMessageLen = 40 })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	content := "说明：\n\n```go\n" + strings.Repeat("fmt.Println(\"hello\")\n", 6) + "```\n\n完。"
+	parts := ch.SplitOutbound(content)
+	if len(parts) < 2 {
+		t.Fatalf("应切成多片，得到 %d", len(parts))
+	}
+	for i, p := range parts {
+		if !hasCompleteFence(p) {
+			t.Fatalf("第 %d 片围栏未闭合:\n%s", i, p)
+		}
+	}
+}
+
+func TestStreamHandleClosesOpenFence(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.Stream = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	h, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "```go\nfmt.Println(1)",
+	})
+	if err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if err := h.Update(context.Background(), "```go\nfmt.Println(1)", false); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	calls := f.calls()
+	last := calls[len(calls)-1]
+	if raw, _ := last["content_raw"].(string); strings.Count(raw, "```")%2 != 0 {
+		t.Fatalf("流式中间态应补闭合围栏，得到 %q", raw)
+	}
+	if ct, _ := last["content_type"].(string); ct != qqbot.ContentTypeMarkdown {
+		t.Fatalf("content_type 期望 markdown，得到 %q", last["content_type"])
+	}
+}
+
+func TestStreamHandleKeepsPlainText(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.Stream = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if _, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "纯文本",
+	}); err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if ct, _ := f.calls()[0]["content_type"].(string); ct != qqbot.ContentTypeText {
+		t.Fatalf("无语法时应为 text，得到 %q", f.calls()[0]["content_type"])
 	}
 }

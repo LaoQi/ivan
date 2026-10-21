@@ -41,6 +41,7 @@ type Config struct {
 	AllowFrom      []string
 	AllowGroups    []string
 	MaxMessageLen  int
+	Markdown       bool
 	StreamMaxLen   int
 	Stream         bool
 	Typing         bool
@@ -127,6 +128,15 @@ func (c *Channel) MaxLen() int { return c.cfg.MaxMessageLen }
 
 func (c *Channel) StreamMaxLen() int { return c.cfg.StreamMaxLen }
 
+// SplitOutbound 实现 channel.Splitter：markdown 模式下按围栏/行边界切分并补闭合围栏，
+// 避免把代码块切得七零八落。
+func (c *Channel) SplitOutbound(text string) []string {
+	if !c.cfg.Markdown {
+		return channel.Split(text, c.cfg.MaxMessageLen)
+	}
+	return splitMarkdown(text, c.cfg.MaxMessageLen)
+}
+
 // StreamOpen 仅对单聊开流式消息：官方明确群消息不支持流式参数。
 func (c *Channel) StreamOpen(ctx context.Context, msg bus.OutboundMessage) (channel.StreamHandle, error) {
 	if !c.cfg.Stream {
@@ -143,7 +153,22 @@ func (c *Channel) StreamOpen(ctx context.Context, msg bus.OutboundMessage) (chan
 	if err != nil {
 		return nil, err
 	}
-	return c.client.OpenStream(ctx, target, msg.Content, "text", replyTo, seq)
+	// 流式原样透传 markdown：平台要求 replace 分片以已下发内容为前缀，
+	// 而表格/围栏的降级是不稳定的行级改写（后续分片会改写前面的行）→ 只能原样发。
+	// 语法被平台拒收时开流失败，Manager 退化为普通消息投递（那条路径有降级链）。
+	ctype := qqbot.ContentTypeText
+	markdown := c.cfg.Markdown && hasMarkdown(msg.Content)
+	if markdown {
+		ctype = qqbot.ContentTypeMarkdown
+	}
+	st, err := c.client.OpenStream(ctx, target, msg.Content, ctype, replyTo, seq)
+	if err != nil {
+		return nil, err
+	}
+	if !markdown {
+		return st, nil
+	}
+	return &streamHandle{stream: st}, nil
 }
 
 // Typing 发送“输入中”状态（msg_type=6），用于正文出现前覆盖静默期。
@@ -423,7 +448,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.client.SendText(ctx, target, content, replyTo, seq); err != nil {
+		if err := c.sendBody(ctx, target, content, replyTo, seq); err != nil {
 			return err
 		}
 	}
@@ -439,6 +464,28 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		if _, err := c.client.SendImage(ctx, target, fileInfo, replyTo, seq); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// sendBody 投递正文：markdown 模式下走 msg_type=2，被平台以 markdown 内容不可用拒收时
+// 自动退回纯文本重发（同一 msg_seq 不重试，重发用下一个序号）。
+func (c *Channel) sendBody(ctx context.Context, target qqbot.Target, content, replyTo string, seq int) error {
+	if !c.cfg.Markdown || !hasMarkdown(content) {
+		_, err := c.client.SendText(ctx, target, content, replyTo, seq)
+		return err
+	}
+	if _, err := c.client.SendMarkdown(ctx, target, toQQMarkdown(content), replyTo, seq); err != nil {
+		if !qqbot.IsMarkdownRejected(err) {
+			return err
+		}
+		c.cfg.Logf("qq markdown 被拒收，退回纯文本: %v", err)
+		next, nextReplyTo, seqErr := c.nextSeq(replyTo, target.IsGroup())
+		if seqErr != nil {
+			return err
+		}
+		_, retryErr := c.client.SendText(ctx, target, content, nextReplyTo, next)
+		return retryErr
 	}
 	return nil
 }

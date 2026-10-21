@@ -620,3 +620,70 @@ func TestUploadChecksums(t *testing.T) {
 		t.Fatalf("md5_10m 窗口应为 10002432 字节，得到 %d", md5WindowBytes)
 	}
 }
+
+func TestSendMarkdownFields(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+
+	ctx := context.Background()
+	if _, err := c.SendMarkdown(ctx, Target{UserOpenID: "u-1"}, "## 标题\n正文", "m-1", 3); err != nil {
+		t.Fatalf("SendMarkdown: %v", err)
+	}
+	call, ok := f.lastSend()
+	if !ok {
+		t.Fatal("服务端未收到发送请求")
+	}
+	if mt, _ := call.Body["msg_type"].(float64); int(mt) != MsgTypeMarkdown {
+		t.Fatalf("msg_type 期望 2，得到 %v", call.Body["msg_type"])
+	}
+	if _, has := call.Body["content"]; has {
+		t.Fatalf("markdown 消息不应带 content: %+v", call.Body)
+	}
+	md, _ := call.Body["markdown"].(map[string]any)
+	if md == nil || md["content"] != "## 标题\n正文" {
+		t.Fatalf("markdown 字段错误: %+v", call.Body["markdown"])
+	}
+	if call.Body["msg_id"] != "m-1" {
+		t.Fatalf("msg_id 未透传: %+v", call.Body)
+	}
+	if n, _ := call.Body["msg_seq"].(float64); int(n) != 3 {
+		t.Fatalf("msg_seq 期望 3，得到 %v", call.Body["msg_seq"])
+	}
+}
+
+func TestSendMarkdownEmptyRejected(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+	if _, err := c.SendMarkdown(context.Background(), Target{UserOpenID: "u-1"}, "   ", "m-1", 1); err == nil {
+		t.Fatal("空 markdown 应报错")
+	}
+}
+
+func TestMarkdownRejectedClassification(t *testing.T) {
+	cases := []struct {
+		code int
+		want bool
+	}{
+		{40034008, true},
+		{40034011, true},
+		{50055, true},
+		{50056, true},
+		{304036, true},
+		{40034005, false},
+		{40054007, false},
+	}
+	for _, c := range cases {
+		err := &Error{Code: c.code, Op: "send"}
+		if got := err.MarkdownRejected(); got != c.want {
+			t.Fatalf("code %d MarkdownRejected=%v，期望 %v", c.code, got, c.want)
+		}
+	}
+	if !IsMarkdownRejected(&Error{Code: 40034011}) {
+		t.Fatal("IsMarkdownRejected 应命中")
+	}
+	if IsMarkdownRejected(&Error{Code: 40034005}) {
+		t.Fatal("窗口过期不应算 markdown 被拒")
+	}
+}

@@ -242,3 +242,55 @@ func TestManagerConsumeDrainsThenStops(t *testing.T) {
 		t.Fatalf("出站消息未被消费: %d", len(f.messages()))
 	}
 }
+
+type splittingChannel struct {
+	*fakeChannel
+	calls []string
+}
+
+func (s *splittingChannel) SplitOutbound(text string) []string {
+	s.calls = append(s.calls, text)
+	return []string{"A|" + text, "B|" + text}
+}
+
+func TestRouteUsesChannelSplitter(t *testing.T) {
+	b := bus.New(4, 4)
+	m := New(b, WithRetries(1))
+	base := &fakeChannel{name: "sp", maxLen: 5}
+	sp := &splittingChannel{fakeChannel: base}
+	if err := m.Register(sp); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := m.Route(context.Background(), bus.OutboundMessage{Channel: "sp", Content: "一二三四五六"}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(sp.calls) != 1 {
+		t.Fatalf("Splitter 应被调用一次，得到 %d", len(sp.calls))
+	}
+	msgs := base.messages()
+	if len(msgs) != 2 {
+		t.Fatalf("通道声明的切分结果应原样投递，得到 %d 条", len(msgs))
+	}
+	if msgs[0].Content != "A|一二三四五六" {
+		t.Fatalf("第 1 条内容错误: %q", msgs[0].Content)
+	}
+}
+
+type emptySplitChannel struct{ *fakeChannel }
+
+func (e *emptySplitChannel) SplitOutbound(string) []string { return nil }
+
+func TestRouteSplitterEmptyFallsBack(t *testing.T) {
+	b := bus.New(4, 4)
+	m := New(b, WithRetries(1))
+	base := &fakeChannel{name: "es", maxLen: 2}
+	if err := m.Register(&emptySplitChannel{fakeChannel: base}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := m.Route(context.Background(), bus.OutboundMessage{Channel: "es", Content: "一二三四"}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got := len(base.messages()); got != 2 {
+		t.Fatalf("应回退通用切分器得到 2 条，得到 %d", got)
+	}
+}

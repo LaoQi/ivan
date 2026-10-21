@@ -12,6 +12,7 @@
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 tanya（`bus`+`channel` 抽库时成对抽出）
 - **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
+- **富文本出站由通道声明**：通道决定出站形态与语法子集（QQ `channels.qq.markdown` 默认开，只在正文含 markdown 语法特征时走 `msg_type=2`），降级（表格→要点行、围栏→缩进、本地图片→文字）与被平台拒收后的纯文本回退都在 `channel/qq` 内；长文本切分经可选能力 `channel.Splitter` 由通道接管（markdown 感知 + 补闭合围栏），Manager 不感知平台语法
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
 - 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
 - `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
@@ -49,7 +50,7 @@ main.go               CLI：run / daemon / send / status / config / version；--
 commands.go           子命令实现：flag 解析、状态渲染、磁盘回退、信号上下文 [已实现]
 config/               ivan 配置（内嵌 agent.Config + runner/daemon/channels 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
 bus/                  消息模型 + Bus（两条缓冲流、非阻塞投递、丢弃计数、关闭语义）+ 会话键归一/KeySlug [已实现，零依赖]
-channel/              Channel 接口 + Manager（路由、清理、切分、重试、状态）+ ErrUnroutable [已实现]
+channel/              Channel 接口 + Manager（路由、清理、切分、重试、状态）+ 可选能力（Limiter/StreamOpener/Typist/StreamLimit/Splitter）+ ErrUnroutable [已实现]
 channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping/chunk/typing）+ 客户端（ivan send/status 用，TTY 下显示增量）[已实现]
 channel/log/          人类可读 Sink（io.Writer，stdlib 依赖）[已实现]
 data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写，含会话映射、暂停、日用量、回合进行中标记）/ Lock（flock）/ LogFile / ProcessAlive / TrimFileTail（按行裁剪）[已实现]
@@ -59,7 +60,7 @@ daemon/               daemon.New/Run（装配、优雅停机顺序、Control(sta
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
 qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 流式消息与输入状态 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
-channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、msg_seq 计数、图片下载/上传、白名单 [已实现]
+channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、markdown 出站与降级（md.go）、msg_seq 计数、图片下载/上传、白名单 [已实现]
 schedule/             作业模型（at/every）、存储抽象 Store + 进程内实现、调度循环（wake/timer、错过策略、暂停与预算闸门）[已实现]
 schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_version 迁移、损坏不重建）[已实现]
 ```

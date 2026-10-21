@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -41,6 +42,7 @@ type Stream struct {
 
 	mu      sync.Mutex
 	id      string
+	ctype   string
 	index   int
 	last    string
 	msgID   string
@@ -62,11 +64,23 @@ func (c *Client) OpenStream(ctx context.Context, target Target, text, contentTyp
 	if target.IsGroup() {
 		return nil, fmt.Errorf("qqbot 群聊不支持流式消息")
 	}
-	s := &Stream{client: c, target: target, msgID: replyTo, msgSeq: seq}
+	s := &Stream{client: c, target: target, msgID: replyTo, msgSeq: seq, ctype: streamContentType(contentType)}
 	if err := s.send(ctx, text, InputStateGenerating, InputModeReplace); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+const (
+	ContentTypeText     = "text"
+	ContentTypeMarkdown = "markdown"
+)
+
+func streamContentType(ct string) string {
+	if strings.EqualFold(strings.TrimSpace(ct), ContentTypeMarkdown) {
+		return ContentTypeMarkdown
+	}
+	return ContentTypeText
 }
 
 // Update 追加/替换流式内容；done 为真时标记生成结束。
@@ -117,7 +131,7 @@ func (s *Stream) send(ctx context.Context, text string, state int, mode string) 
 		InputMode:   mode,
 		InputState:  state,
 		Index:       s.index,
-		ContentType: "text",
+		ContentType: s.ctype,
 		ContentRaw:  text,
 		MsgID:       s.msgID,
 		StreamMsgID: s.id,

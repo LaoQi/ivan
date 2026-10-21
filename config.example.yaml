@@ -97,6 +97,10 @@ channels:
     allow_groups: []
     # 出站切分上限（通用切分器生效；cli 通道不切分）
     max_message_len: 1200
+    # 出站 Markdown（msg_type=2）：仅当正文含 markdown 语法特征时才用，
+    # 表格转要点行、代码围栏转缩进（官方 Markdown 页未列这两项）、本地图片转文字说明；
+    # 被平台以 markdown 内容不可用拒收时自动退回纯文本重发
+    markdown: true
     # 单聊流式消息（官方 /stream_messages，原地更新同一条消息）；群聊官方不支持，自动退化
     stream: true
     # 流式消息内正文上限（字符）

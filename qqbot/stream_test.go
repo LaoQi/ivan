@@ -136,3 +136,42 @@ func TestTypingSendsInputNotify(t *testing.T) {
 		t.Fatalf("缺 msg_id: %+v", body)
 	}
 }
+
+func TestOpenStreamMarkdownContentType(t *testing.T) {
+	rec := &streamRecorder{}
+	srv := newStreamServer(t, rec)
+	c := newStreamClient(t, srv)
+	st, err := c.OpenStream(context.Background(), Target{UserOpenID: "u1"}, "## 标题", ContentTypeMarkdown, "m-1", 1)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if err := st.Update(context.Background(), "## 标题\n正文", false); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.chunks) != 2 {
+		t.Fatalf("分片数 %d", len(rec.chunks))
+	}
+	for i, ch := range rec.chunks {
+		if ch.ContentType != ContentTypeMarkdown {
+			t.Fatalf("第 %d 片 content_type=%q", i, ch.ContentType)
+		}
+	}
+}
+
+func TestOpenStreamContentTypeDefaultsToText(t *testing.T) {
+	rec := &streamRecorder{}
+	srv := newStreamServer(t, rec)
+	c := newStreamClient(t, srv)
+	st, err := c.OpenStream(context.Background(), Target{UserOpenID: "u1"}, "纯文本", "", "m-1", 1)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	_ = st
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.chunks[0].ContentType != ContentTypeText {
+		t.Fatalf("空 content_type 应收敛为 text，得到 %q", rec.chunks[0].ContentType)
+	}
+}

@@ -210,3 +210,26 @@ func TestGlobalAgentsPath(t *testing.T) {
 		t.Fatalf("~ 未展开: %q", cfg.GlobalAgentsPath())
 	}
 }
+
+func TestQQMarkdownDefaultsOn(t *testing.T) {
+	cfg := Default()
+	if !cfg.Channels.QQ.Markdown {
+		t.Fatal("QQ markdown 应默认开启")
+	}
+}
+
+func TestQQMarkdownFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "channels:\n  qq:\n    enabled: true\n    markdown: false\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Channels.QQ.Markdown {
+		t.Fatal("配置中的 markdown: false 应生效")
+	}
+}
