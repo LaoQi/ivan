@@ -153,19 +153,24 @@ func (c *Channel) StreamOpen(ctx context.Context, msg bus.OutboundMessage) (chan
 	if err != nil {
 		return nil, err
 	}
-	// 流式原样透传 markdown：平台要求 replace 分片以已下发内容为前缀，
-	// 而表格/围栏的降级是不稳定的行级改写（后续分片会改写前面的行）→ 只能原样发。
-	// 语法被平台拒收时开流失败，Manager 退化为普通消息投递（那条路径有降级链）。
+	// 流式必须按开关声明 content_type，**不能用首片片段做语法判定**：
+	// 开流发生在正文刚有首字时（实测首片常是"我这条回复就带…"这类说明文字），
+	// 而 content_type 在首片即锁定、后续分片无法更改——按片段判定会让整条消息
+	// 以纯文本渲染，markdown 全部丢失。开关打开即声明 markdown，不支持的语法
+	// 由平台忽略（如代码块/表格），语法整体被拒时开流失败、Manager 退化为普通
+	// 消息投递（那条路径才有降级链与拒收回退）。
+	//
+	// 另外流式原样透传正文不改写：平台要求 replace 分片以已下发内容为前缀，
+	// 而表格/围栏的降级是不稳定的行级改写（后续分片会改写前面的行）。
 	ctype := qqbot.ContentTypeText
-	markdown := c.cfg.Markdown && hasMarkdown(msg.Content)
-	if markdown {
+	if c.cfg.Markdown {
 		ctype = qqbot.ContentTypeMarkdown
 	}
 	st, err := c.client.OpenStream(ctx, target, msg.Content, ctype, replyTo, seq)
 	if err != nil {
 		return nil, err
 	}
-	if !markdown {
+	if ctype != qqbot.ContentTypeMarkdown {
 		return st, nil
 	}
 	return &streamHandle{stream: st}, nil

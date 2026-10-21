@@ -634,7 +634,9 @@ func TestStreamHandleClosesOpenFence(t *testing.T) {
 	}
 }
 
-func TestStreamHandleKeepsPlainText(t *testing.T) {
+// 开关打开时流式一律声明 markdown（首片片段无法代表全文语法；官方流式示例
+// 同样以 content_type=markdown 发送纯文本正文）。
+func TestStreamHandleDeclaresMarkdownWhenEnabled(t *testing.T) {
 	f := newFakeAPI(t)
 	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.Stream = true })
 	ch.translate(directEvent("m-1", "u-1", "hi"))
@@ -644,7 +646,50 @@ func TestStreamHandleKeepsPlainText(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StreamOpen: %v", err)
 	}
+	if ct, _ := f.calls()[0]["content_type"].(string); ct != qqbot.ContentTypeMarkdown {
+		t.Fatalf("markdown 开关打开时应声明 markdown，得到 %q", f.calls()[0]["content_type"])
+	}
+}
+
+// 关闭 markdown 时流式仍走 text。
+func TestStreamHandleTextWhenMarkdownDisabled(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = false; c.Stream = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	if _, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "# 标题",
+	}); err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
 	if ct, _ := f.calls()[0]["content_type"].(string); ct != qqbot.ContentTypeText {
-		t.Fatalf("无语法时应为 text，得到 %q", f.calls()[0]["content_type"])
+		t.Fatalf("关闭 markdown 后应为 text，得到 %q", f.calls()[0]["content_type"])
+	}
+}
+
+// 回归：流式开流时正文只是首片片段（真实场景中首片通常是"我这条回复…"这类
+// 无语法特征的说明文字），而 content_type 在首片即锁定、后续分片不可更改。
+// 若按"首片是否含语法"判定，整条消息都会以 text 渲染 → markdown 全部丢失。
+func TestStreamOpenDeclaresMarkdownRegardlessOfPartialText(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Markdown = true; c.Stream = true })
+	ch.translate(directEvent("m-1", "u-1", "hi"))
+
+	h, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{
+		Channel: Name, ChatID: "u-1", ReplyTo: "m-1", Content: "我这条回复就带",
+	})
+	if err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if err := h.Update(context.Background(), "我这条回复就带 markdown：\n\n# 标题\n\n- 项目", true); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	first := f.calls()[0]
+	if ct, _ := first["content_type"].(string); ct != qqbot.ContentTypeMarkdown {
+		t.Fatalf("流式必须声明 markdown（首片无语法不代表整条无语法），得到 %q", first["content_type"])
+	}
+	last := f.calls()[len(f.calls())-1]
+	if ct, _ := last["content_type"].(string); ct != qqbot.ContentTypeMarkdown {
+		t.Fatalf("终片 content_type 应为 markdown，得到 %q", last["content_type"])
 	}
 }
