@@ -13,14 +13,15 @@ import (
 
 type fakeStreamer struct {
 	fakeChannel
-	streamLen int
-	mu        sync.Mutex
-	opens     []bus.OutboundMessage
-	updates   []string
-	finals    []string
-	typing    int
-	failOn    map[int]bool
-	n         int
+	streamLen  int
+	mu         sync.Mutex
+	opens      []bus.OutboundMessage
+	updates    []string
+	finals     []string
+	typing     int
+	failOn     map[int]bool
+	failUpdate int
+	n          int
 }
 
 func (f *fakeStreamer) StreamMaxLen() int {
@@ -53,6 +54,10 @@ type fakeHandle struct{ owner *fakeStreamer }
 func (h *fakeHandle) Update(_ context.Context, text string, done bool) error {
 	h.owner.mu.Lock()
 	defer h.owner.mu.Unlock()
+	if h.owner.failUpdate > 0 {
+		h.owner.failUpdate--
+		return errors.New("模拟额度耗尽")
+	}
 	if done {
 		h.owner.finals = append(h.owner.finals, text)
 	} else {
@@ -247,5 +252,33 @@ func TestAbortStreams(t *testing.T) {
 	}
 	if n := m.streams.len(); n != 0 {
 		t.Fatalf("停机后残留 %d 条流", n)
+	}
+}
+
+// 更新持续失败（生产上对应被动回复额度耗尽）时必须降级为普通消息，不能丢内容。
+func TestRouteStreamUpdateFailureStillDeliversFinal(t *testing.T) {
+	m := New(bus.New(4, 4), WithRetries(1), WithRetryDelay(0))
+	f := &fakeStreamer{fakeChannel: fakeChannel{name: "qq", maxLen: 0}, failUpdate: 10}
+	if err := m.Register(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Route(context.Background(), bus.OutboundMessage{Channel: "qq", ChatID: "u1", Stream: "s1", Content: "第一段"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Route(context.Background(), bus.OutboundMessage{Channel: "qq", ChatID: "u1", Stream: "s1", Content: "第一段第二段"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Route(context.Background(), bus.OutboundMessage{Channel: "qq", ChatID: "u1", Stream: "s1", Content: "完整最终内容", Final: true}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := f.messages()
+	if len(msgs) != 1 || msgs[0].Content != "完整最终内容" {
+		t.Fatalf("持续失败后应把完整内容作为普通消息补投: %+v", msgs)
+	}
+	if msgs[0].Stream != "" || !msgs[0].Final {
+		t.Fatalf("补投消息不应带流式标记: %+v", msgs[0])
+	}
+	if st := m.Status()[0]; st.StreamFail == 0 {
+		t.Fatalf("未记录流式失败: %+v", st)
 	}
 }
