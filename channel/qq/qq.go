@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	Name           = "qq"
-	DefaultMaxLen  = 1200
-	DefaultMediaMB = 20
+	Name              = "qq"
+	DefaultMaxLen     = 1200
+	DefaultStreamLen  = 1200
+	DefaultTypingSecs = 60
+	DefaultMediaMB    = 20
 )
 
 const (
@@ -30,6 +32,7 @@ const (
 	passiveWindowGroup = 5 * time.Minute
 	passiveMaxC2C      = 4
 	passiveMaxGroup    = 5
+	typingReserve      = 2
 )
 
 type Config struct {
@@ -38,6 +41,10 @@ type Config struct {
 	AllowFrom      []string
 	AllowGroups    []string
 	MaxMessageLen  int
+	StreamMaxLen   int
+	Stream         bool
+	Typing         bool
+	TypingSeconds  int
 	AllowProactive bool
 	ReconnectMax   time.Duration
 	MediaDir       string
@@ -77,6 +84,12 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.MediaMaxBytes <= 0 {
 		cfg.MediaMaxBytes = int64(DefaultMediaMB) << 20
 	}
+	if cfg.StreamMaxLen <= 0 {
+		cfg.StreamMaxLen = DefaultStreamLen
+	}
+	if cfg.TypingSeconds <= 0 || cfg.TypingSeconds > 60 {
+		cfg.TypingSeconds = DefaultTypingSecs
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -111,6 +124,71 @@ func New(cfg Config) (*Channel, error) {
 func (c *Channel) Name() string { return Name }
 
 func (c *Channel) MaxLen() int { return c.cfg.MaxMessageLen }
+
+func (c *Channel) StreamMaxLen() int { return c.cfg.StreamMaxLen }
+
+// StreamOpen 仅对单聊开流式消息：官方明确群消息不支持流式参数。
+func (c *Channel) StreamOpen(ctx context.Context, msg bus.OutboundMessage) (channel.StreamHandle, error) {
+	if !c.cfg.Stream {
+		return nil, fmt.Errorf("%w: qq 流式未启用", channel.ErrUnroutable)
+	}
+	target, ok := c.resolveTarget(msg)
+	if !ok {
+		return nil, fmt.Errorf("%w: qq 未知会话 %q", channel.ErrUnroutable, msg.ChatID)
+	}
+	if target.IsGroup() {
+		return nil, fmt.Errorf("%w: qq 群聊不支持流式消息", channel.ErrUnroutable)
+	}
+	seq, replyTo, err := c.nextSeq(msg.ReplyTo, false)
+	if err != nil {
+		return nil, err
+	}
+	return c.client.OpenStream(ctx, target, msg.Content, "text", replyTo, seq)
+}
+
+// Typing 发送“输入中”状态（msg_type=6），用于正文出现前覆盖静默期。
+// 它会占用一次被动回复额度，因此要求剩余额度 >= 2（留足最终结果），否则跳过。
+func (c *Channel) Typing(ctx context.Context, msg bus.OutboundMessage) error {
+	if !c.cfg.Typing {
+		return fmt.Errorf("%w: qq 输入状态未启用", channel.ErrUnroutable)
+	}
+	target, ok := c.resolveTarget(msg)
+	if !ok {
+		return fmt.Errorf("%w: qq 未知会话 %q", channel.ErrUnroutable, msg.ChatID)
+	}
+	group := target.IsGroup()
+	replyTo := strings.TrimSpace(msg.ReplyTo)
+	if replyTo != "" && c.remaining(replyTo, group) <= typingReserve {
+		return fmt.Errorf("%w: qq 被动回复额度不足，跳过输入状态", channel.ErrUnroutable)
+	}
+	seq, replyTo, err := c.nextSeq(msg.ReplyTo, group)
+	if err != nil {
+		return err
+	}
+	return c.client.Typing(ctx, target, replyTo, seq, c.cfg.TypingSeconds)
+}
+
+// remaining 返回某条入站消息还剩多少次被动回复额度（无 msg_id 时返回上限，交由主动消息路径处理）。
+func (c *Channel) remaining(replyTo string, group bool) int {
+	replyTo = strings.TrimSpace(replyTo)
+	if replyTo == "" {
+		return passiveMaxC2C
+	}
+	maxReplies := passiveMaxC2C
+	window := passiveWindowC2C
+	if group {
+		maxReplies = passiveMaxGroup
+		window = passiveWindowGroup
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.seqs[replyTo]
+	if st == nil || now.Sub(st.start) > window {
+		return maxReplies
+	}
+	return maxReplies - st.count
+}
 
 func (c *Channel) Start(ctx context.Context, b *bus.Bus) error {
 	c.mu.Lock()

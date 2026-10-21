@@ -140,6 +140,16 @@ socket 协议：**JSON Lines**，一行一帧（单帧上限 1 MiB），字段 `
 - 出站消息带 `ReplyTo`（来源消息 id）时应优先试被动；定时/告警类消息（无来源）直接走主动。
 - 通知类消息 best-effort：失败只记事件与计数，不重试到阻塞，不影响回合结算。
 
+## 9.1 中间态与流式出站（2026-10-22 实现）
+
+长回合（多轮工具调用）会让用户长时间只看到静默，"服务无响应"与"正在跑"不可区分。为此引入**更新型出站**：一条逻辑消息可以被多次原位更新。
+
+- 消息模型（`bus`）：`OutboundMessage.Stream`（逻辑消息 id，空 = 普通消息）、`Final`（是否定稿）、`Kind = bus.KindTyping`（临时状态，不产生消息）；`Stream` 非空即走流式路由。
+- 通道可选能力（`channel`）：`StreamOpener{ StreamOpen(ctx, msg) (StreamHandle, error) }`（`StreamHandle.Update(ctx, text, done)`）与 `Typist{ Typing(ctx, msg) error }`；`StreamLimit{ StreamMaxLen() int }` 限定单条消息内展示的正文长度（默认 1200）。
+- `Manager` 职责：按 `(channel, stream_id)` 归并并发分片（同 id 只开一次流）、节流外的合并、溢出收尾与余下内容补发、失败退化（开流失败或通道不支持 → 终局文本按普通消息投递）。**不支持流式的通道不需要任何改动**：中间态静默丢弃、终局照常。
+- 与默认语义的关系：`Sent/Failed` 计数只统计普通消息；流式另有 `StreamSent/StreamUpd/StreamSkip/StreamFail/StreamFinal/Typing/TypingFail`，`ivan status` 里 `stream=`/`upd=`/`final=` 可见。
+- 不变式：中间态**不额外请求模型、不计预算**；失败只计数不重试；终局消息的 `Kind`（reply/error）沿用回合结果，不被流式改写。
+
 ## 10 P1 实现记录（2026-10-10）
 
 代码：`bus/`（零依赖）、`channel/`、`channel/cli/`、`channel/log/`、`daemon/`；测试：`bus`/`channel`/`channel/cli`/`channel/log` 单测 + `daemon` 端到端（假 LLM + 真 socket，覆盖 send 往返、status、重启续聊、锁互斥、损坏状态拒绝启动）。

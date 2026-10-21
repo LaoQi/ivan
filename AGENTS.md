@@ -16,6 +16,7 @@
 - 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
 - `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
 - 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
+- **中间态投递（更新型出站）**：长回合的"还在跑"反馈实现为**同一条消息的原位更新**（`bus.OutboundMessage.Stream`/`Final`，`channel.StreamOpener`/`Typist` 可选能力），**不做逐里程碑进度消息**；正文就绪前用 `KindTyping`（QQ `msg_type=6`、cli typing 帧）覆盖静默期，正文就绪后流式跟进，超出 `runner.stream_max_chars` 收尾并补发余下内容；不支持流式的通道自动退化（中间态丢弃、终局照常），中间态不计预算、失败只计数不重试
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
 - **全局说明与实际隔离**：system prompt 的"全局说明"段只读 ivan 自己的 `~/.config/ivan/AGENTS.md`（配置项 `global_agents`，`off` 禁用），**不读 tanya 的 `~/.config/tanya/AGENTS.md`**（经 tanya `agent.WithGlobalAgentsPath` 注入；机制保留、位置隔离）
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；AppSecret 不进日志/事件/错误信息。**危险命令黑名单与审批档属 P5 保留计划，当前未实施**（缓解只有限定工作区 + 预算 + 暂停 + 事件审计）
@@ -49,7 +50,7 @@ commands.go           子命令实现：flag 解析、状态渲染、磁盘回�
 config/               ivan 配置（内嵌 agent.Config + runner/daemon/channels 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
 bus/                  消息模型 + Bus（两条缓冲流、非阻塞投递、丢弃计数、关闭语义）+ 会话键归一/KeySlug [已实现，零依赖]
 channel/              Channel 接口 + Manager（路由、清理、切分、重试、状态）+ ErrUnroutable [已实现]
-channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping）+ 客户端（ivan send/status 用）[已实现]
+channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping/chunk/typing）+ 客户端（ivan send/status 用，TTY 下显示增量）[已实现]
 channel/log/          人类可读 Sink（io.Writer，stdlib 依赖）[已实现]
 data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写，含会话映射、暂停、日用量、回合进行中标记）/ Lock（flock）/ LogFile / ProcessAlive / TrimFileTail（按行裁剪）[已实现]
 prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段（含会话键、记忆文件、目标文件路径）；全局说明由 `config.global_agents` 注入（默认 `~/.config/ivan/AGENTS.md`）[已实现]
@@ -57,7 +58,7 @@ runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
-qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
+qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 流式消息与输入状态 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
 channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、msg_seq 计数、图片下载/上传、白名单 [已实现]
 schedule/             作业模型（at/every）、存储抽象 Store + 进程内实现、调度循环（wake/timer、错过策略、暂停与预算闸门）[已实现]
 schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_version 迁移、损坏不重建）[已实现]
@@ -88,6 +89,7 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . status
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . jobs        # 作业列表（直接读作业库）
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . pause       # 暂停无人值守触发（定时作业 + 自动续跑）
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . cancel cli:default   # 取消某会话在跑的回合
+IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "说点长的"       # TTY 下原地刷新显示增量（重定向则只出最终答案）
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 

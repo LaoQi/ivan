@@ -26,6 +26,8 @@ const (
 	OpStatus = "status"
 	OpPing   = "ping"
 	OpReply  = "reply"
+	OpChunk  = "chunk"
+	OpTyping = "typing"
 	OpError  = "error"
 	OpAck    = "ack"
 	OpPong   = "pong"
@@ -37,7 +39,8 @@ const (
 	OpCancel     = "cancel"
 	OpResume     = "resume"
 
-	maxFrame = 1 << 20
+	maxFrame     = 1 << 20
+	cliStreamLen = 4000
 )
 
 var ErrNotRunning = errors.New("daemon 未运行")
@@ -47,6 +50,7 @@ type Frame struct {
 	Op      string          `json:"op"`
 	Text    string          `json:"text,omitempty"`
 	Session string          `json:"session,omitempty"`
+	Done    bool            `json:"done,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Error   string          `json:"error,omitempty"`
 }
@@ -154,6 +158,59 @@ func (s *Socket) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		op = OpError
 	}
 	return cn.write(Frame{ID: msg.ChatID, Op: op, Text: msg.Content})
+}
+
+// StreamMaxLen 限定中间态正文长度（cli 不切分，超长由客户端只显示尾部）。
+func (s *Socket) StreamMaxLen() int { return cliStreamLen }
+
+// StreamOpen 把 cli 请求的回包开成可多次更新的帧（daemon 模式下前台可见增量）。
+func (s *Socket) StreamOpen(ctx context.Context, msg bus.OutboundMessage) (channel.StreamHandle, error) {
+	cn := s.pendingConn(msg.ChatID)
+	if cn == nil {
+		return nil, fmt.Errorf("%w: cli 无对应请求 %q", channel.ErrUnroutable, msg.ChatID)
+	}
+	return &streamConn{cn: cn, id: msg.ChatID}, nil
+}
+
+// Typing 通知前端“仍在处理”，不产生回包内容。
+func (s *Socket) Typing(ctx context.Context, msg bus.OutboundMessage) error {
+	cn := s.pendingConn(msg.ChatID)
+	if cn == nil {
+		return fmt.Errorf("%w: cli 无对应请求 %q", channel.ErrUnroutable, msg.ChatID)
+	}
+	return cn.write(Frame{ID: msg.ChatID, Op: OpTyping})
+}
+
+func (s *Socket) pendingConn(id string) *conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending[id]
+}
+
+func (s *Socket) takePending(id string, cn *conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur := s.pending[id]; cur == cn {
+		delete(s.pending, id)
+	}
+}
+
+type streamConn struct {
+	cn *conn
+	id string
+}
+
+// Update 中间态发 chunk 帧，定稿发 reply 帧并释放请求（cli 的请求-应答契约不变）。
+func (sc *streamConn) Update(ctx context.Context, text string, done bool) error {
+	if !done {
+		return sc.cn.write(Frame{ID: sc.id, Op: OpChunk, Text: text})
+	}
+	sc.cn.s.takePending(sc.id, sc.cn)
+	op := OpReply
+	if text == "" {
+		text = ""
+	}
+	return sc.cn.write(Frame{ID: sc.id, Op: op, Text: text, Done: true})
 }
 
 func (s *Socket) accept() {
@@ -374,7 +431,12 @@ func (c *Client) Read(timeout time.Duration) (Frame, error) {
 
 func (c *Client) Close() error { return c.c.Close() }
 
+// Send 发送一条消息并等回复；onChunk 非空时接收中间态增量（可为 nil）。
 func Send(path, text, session string, wait time.Duration) (string, error) {
+	return SendStream(path, text, session, wait, nil)
+}
+
+func SendStream(path, text, session string, wait time.Duration, onChunk func(string)) (string, error) {
 	cl, err := Dial(path, wait)
 	if err != nil {
 		return "", err
@@ -399,6 +461,13 @@ func Send(path, text, session string, wait time.Duration) (string, error) {
 		}
 		switch f.Op {
 		case OpAck:
+			continue
+		case OpTyping:
+			continue
+		case OpChunk:
+			if onChunk != nil && f.Text != "" {
+				onChunk(f.Text)
+			}
 			continue
 		case OpReply:
 			return f.Text, nil

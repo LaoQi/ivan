@@ -27,6 +27,12 @@ type harness struct {
 
 func newHarness(t *testing.T, control Control) *harness {
 	t.Helper()
+	return newHarnessOpt(t, control, true)
+}
+
+// newHarnessOpt 的 echo 为假时，入站消息不会自动回包（供流式/输入状态用例独占 pending）。
+func newHarnessOpt(t *testing.T, control Control, echo bool) *harness {
+	t.Helper()
 	h := &harness{t: t, bus: bus.New(8, 8), stop: make(chan struct{})}
 	h.path = filepath.Join(t.TempDir(), "ivan.sock")
 	h.sock = NewSocket(h.path, control)
@@ -43,7 +49,9 @@ func newHarness(t *testing.T, control Control) *harness {
 				h.mu.Lock()
 				h.seen = append(h.seen, msg)
 				h.mu.Unlock()
-				h.bus.Post(bus.OutboundMessage{Channel: msg.Channel, ChatID: msg.ChatID, ReplyTo: msg.MessageID, Content: "echo: " + msg.Content})
+				if echo {
+					h.bus.Post(bus.OutboundMessage{Channel: msg.Channel, ChatID: msg.ChatID, ReplyTo: msg.MessageID, Content: "echo: " + msg.Content})
+				}
 			case <-h.stop:
 				return
 			}
@@ -264,5 +272,116 @@ func TestNormalizeSession(t *testing.T) {
 		if got := NormalizeSession(in); got != want {
 			t.Errorf("NormalizeSession(%q) = %q want %q", in, got, want)
 		}
+	}
+}
+
+func TestStreamChunksThenReply(t *testing.T) {
+	h := newHarnessOpt(t, nil, false)
+	cl, err := Dial(h.path, time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	id := NewID()
+	if err := cl.Do(Frame{ID: id, Op: OpSend, Text: "长任务", Session: ""}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	f, err := cl.Read(time.Second)
+	if err != nil || f.Op != OpAck {
+		t.Fatalf("未收到 ack: %+v %v", f, err)
+	}
+	handle, err := h.sock.StreamOpen(context.Background(), bus.OutboundMessage{ChatID: id})
+	if err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if err := handle.Update(context.Background(), "半截", false); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	chunk, err := cl.Read(time.Second)
+	if err != nil || chunk.Op != OpChunk || chunk.Text != "半截" {
+		t.Fatalf("中间态帧异常: %+v %v", chunk, err)
+	}
+	if err := handle.Update(context.Background(), "完整答案", true); err != nil {
+		t.Fatalf("Update(done): %v", err)
+	}
+	final, err := cl.Read(time.Second)
+	if err != nil || final.Op != OpReply || final.Text != "完整答案" {
+		t.Fatalf("终局帧异常: %+v %v", final, err)
+	}
+	if err := h.sock.Send(context.Background(), bus.OutboundMessage{Channel: Name, ChatID: id, Content: "重复"}); !errors.Is(err, channel.ErrUnroutable) {
+		t.Fatalf("定稿后连接应已释放: %v", err)
+	}
+}
+
+func TestSendStreamDeliversChunksToClient(t *testing.T) {
+	h := newHarnessOpt(t, nil, false)
+	var chunks []string
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			h.mu.Lock()
+			n := len(h.seen)
+			h.mu.Unlock()
+			if n == 0 {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return
+		}
+	}()
+	done := make(chan string, 1)
+	go func() {
+		text, err := SendStream(h.path, "干活", "", 3*time.Second, func(s string) {
+			chunks = append(chunks, s)
+		})
+		if err != nil {
+			done <- "error: " + err.Error()
+			return
+		}
+		done <- text
+	}()
+	time.Sleep(200 * time.Millisecond)
+	msgs := h.messages()
+	if len(msgs) == 0 {
+		t.Fatal("未收到入站消息")
+	}
+	handle, err := h.sock.StreamOpen(context.Background(), bus.OutboundMessage{ChatID: msgs[0].ChatID})
+	if err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if err := handle.Update(context.Background(), "增量一", false); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_ = handle.Update(context.Background(), "增量一+二", true)
+	if got := <-done; got != "增量一+二" {
+		t.Fatalf("终局异常: %q", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if len(chunks) != 1 || chunks[0] != "增量一" {
+		t.Fatalf("客户端未收到增量: %v", chunks)
+	}
+}
+
+func TestTypingFrameToClient(t *testing.T) {
+	h := newHarnessOpt(t, nil, false)
+	cl, err := Dial(h.path, time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	id := NewID()
+	if err := cl.Do(Frame{ID: id, Op: OpSend, Text: "慢活"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if _, err := cl.Read(time.Second); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if err := h.sock.Typing(context.Background(), bus.OutboundMessage{ChatID: id}); err != nil {
+		t.Fatalf("Typing: %v", err)
+	}
+	f, err := cl.Read(time.Second)
+	if err != nil || f.Op != OpTyping {
+		t.Fatalf("输入状态帧异常: %+v %v", f, err)
 	}
 }

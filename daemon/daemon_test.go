@@ -32,6 +32,7 @@ func testConfig(t *testing.T, srv *fakellm.Server) *config.Config {
 	cfg.ConfigPath = filepath.Join(dir, "config.yaml")
 	cfg.SessionMode = "global"
 	cfg.Daemon.ShutdownTimeoutSeconds = 3
+	cfg.Runner.Stream = false
 	return cfg
 }
 
@@ -258,5 +259,43 @@ func TestNewFailsOnCorruptState(t *testing.T) {
 	raw, _ := os.ReadFile(cfg.StatePath())
 	if !strings.Contains(string(raw), "坏") {
 		t.Fatalf("损坏文件应保留: %q", raw)
+	}
+}
+
+func TestDaemonStreamsToCliClient(t *testing.T) {
+	srv := fakellm.NewChunked(400*time.Millisecond, fakellm.Step{Content: "流式答案看看"})
+	defer srv.Close()
+	cfg := testConfig(t, srv)
+	cfg.Runner.Stream = true
+	cfg.Runner.StreamFirstSeconds = 0
+	cfg.Channels.CLI.Stream = true
+	run := start(t, cfg)
+	defer run.stop(t)
+
+	var chunks []string
+	reply, err := cli.SendStream(cfg.SocketPath(), "慢问题", "", 10*time.Second, func(s string) {
+		chunks = append(chunks, s)
+	})
+	if err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	if reply != "流式答案看看" {
+		t.Fatalf("终局回复异常: %q", reply)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	st := fetchStatus(t, cfg)
+	for st.Channels[0].StreamFinal == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		st = fetchStatus(t, cfg)
+	}
+	c := st.Channels[0]
+	if c.StreamFinal != 1 || c.StreamSent != 1 {
+		t.Fatalf("流式计数异常: %+v", c)
+	}
+	if c.Sent != 0 {
+		t.Fatalf("流式路径不应计普通发送: %+v", c)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("客户端未收到中间态增量")
 	}
 }

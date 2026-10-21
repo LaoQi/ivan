@@ -144,6 +144,17 @@ channels:
 
 其他：`msg_type` `0` 文本 / `2` markdown / `7` 富媒体；相同 `msg_id`+`msg_seq` 重复发送失败；机器人须 WebSocket 在线才能发消息；用户可关闭"允许主动发送"。
 
+## 11.1 流式消息与输入状态（官方文档抓取 2026-10-22）
+
+- **流式发送单聊消息**：`POST /v2/users/{user_openid}/stream_messages`（50 QPS）。
+  - 请求体：`stream_msg_id`（首条由服务端生成并返回，后续分片必须携带上一分片返回的 id）、`index`（从 0 递增）、`input_state`（1=生成中、10=生成结束）、`input_mode`（`append` 默认 / `replace` 须以上游已下发前缀 `SentContent` 开头）、`content_type`（`text` / `markdown`）、`content_raw`、`msg_id`/`event_id`（被动回复二选一）、`msg_seq`、`is_wakeup`。
+  - 响应：`id`（首条即 `stream_msg_id`）、`timestamp`、`ext_info`、`remain_msg_len`（剩余长度，字符数）。
+  - 错误码：`40007` 已下发内容前缀不可修改、`50001` 服务内部错误、`50002` 频率限制。
+  - **`replace` 语义决定了流式消息里只能放"正文"**：不能先写"处理中…"再改成正文（那不是已有内容的前缀，会报 `40007`）。故 ivan 的实现是——静默期用下面的 `msg_type=6` 覆盖，正文出现后才开流并逐次替换为更长的前缀。
+- **群聊官方明确"不支持流式参数"**（发送群聊消息页原文）→ 群聊自动退化：不开流，走"输入中" + 普通消息。
+- **输入中状态**：`POST /v2/{users|groups}/{openid}/messages`，`msg_type=6` + `input_notify{input_type:1, input_second≤60}`；与被动回复同用 `msg_id`/`msg_seq`，因此**会占用被动回复次数**——ivan 只在剩余额度 > 2 时才发（给最终结果留足），额度不足自动跳过。
+- 已核对：`msg_type` 取值 `0` 文本 / `2` markdown / `6` 输入中 / `7` 富媒体；群聊 `msg_type` 只有 `0/2/7`（无 6）。
+
 ## 12 凭证与部署参数
 
 - **凭证一律不进仓库、不进文档、不进日志**：`app_id` 与 `app_secret` 由部署方自行提供，
@@ -153,6 +164,10 @@ channels:
   否则会争抢事件与 `msg_seq`。部署新实例前先停掉旧实例。
 - 排障时若怀疑凭证形态，先用只读请求核对 `POST /app/getAppAccessToken` 与 `/gateway/bot` 的返回，
   不要把 token / secret 打进日志。
+
+## 12.1 流式实现（2026-10-22）
+
+`qqbot/stream.go`：`OpenStream`（首片 `input_state=1, index=0`）/ `Stream.Update`（`replace` 全量、`done` 时 `input_state=10`）/ `Client.Typing`；协议细节（分片序号、`stream_msg_id` 传递、`input_state`）全部留在协议包内。`channel/qq` 实现 `channel.StreamOpener` 与 `channel.Typist`：单聊开流（群聊明确报错 → Manager 退化）、`StreamMaxLen()`（`stream_max_len`，默认 1200）、`Typing` 前检查被动额度剩余（`typingReserve=2`，不足则跳过）。配置：`channels.qq.stream`、`stream_max_len`、`typing`。**未做真机验证**（按用户口径"配额按文档默认参数限制、可配置、不做测试"）：分片是否计被动额度、`remain_msg_len` 实际取值待真机时确认；实现上已做两处保守处理——流式分片共用一个 `msg_id`/`msg_seq`（首片取一次被动序号），`input_notify` 在额度不足时跳过。
 
 ## 13 P2 实现记录（2026-10-20）
 

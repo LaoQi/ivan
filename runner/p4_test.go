@@ -28,6 +28,7 @@ func bareConfig(t *testing.T, baseURL string) *config.Config {
 	cfg.UserAgent = "ivan/test"
 	cfg.ConfigPath = filepath.Join(dir, "config.yaml")
 	cfg.SessionMode = "global"
+	cfg.Runner.Stream = false
 	return cfg
 }
 

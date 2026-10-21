@@ -126,6 +126,9 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			AllowFrom:      cfg.Channels.QQ.AllowFrom,
 			AllowGroups:    cfg.Channels.QQ.AllowGroups,
 			MaxMessageLen:  cfg.Channels.QQ.MaxMessageLen,
+			StreamMaxLen:   cfg.Channels.QQ.StreamMaxLen,
+			Stream:         cfg.Channels.QQ.Stream,
+			Typing:         cfg.Channels.QQ.Typing,
 			AllowProactive: cfg.Channels.QQ.AllowProactive,
 			ReconnectMax:   time.Duration(cfg.Channels.QQ.ReconnectMaxSec) * time.Second,
 			MediaDir:       cfg.MediaDir(),
@@ -259,6 +262,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.runner.CancelTurns()
 		d.runner.Wait(5 * time.Second)
 	}
+	d.mgr.AbortStreams()
 	d.bus.CloseOutbound()
 	select {
 	case <-d.mgr.Drained():

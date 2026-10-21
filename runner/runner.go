@@ -182,6 +182,10 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 	if ag := inst.ag; ag != nil {
 		turn.Session = ag.SessionID()
 	}
+	if s := t.stream; s != nil {
+		turn.NotifyError = briefErr(s.finish(out))
+		return turn, err
+	}
 	if out.Channel != msg.Channel {
 		turn.NotifyError = r.deliver(ctx, out)
 	} else if r.opts.Bus != nil && !r.opts.Bus.Post(out) {
@@ -558,6 +562,8 @@ type task struct {
 	content strings.Builder
 	tokens  int
 	context int
+	tool    string
+	stream  *streamState
 }
 
 func promptOf(msg bus.InboundMessage) string {
@@ -587,6 +593,7 @@ func (t *task) run(ctx context.Context) error {
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 		}
 	}()
+	t.streamStart()
 	hinted, forced, hops := false, false, 0
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
@@ -757,6 +764,7 @@ func (t *task) sink(e agent.Event) {
 		t.mu.Lock()
 		t.content.WriteString(e.Text)
 		t.mu.Unlock()
+		t.syncStream()
 		if w := t.r.opts.Stream; w != nil {
 			fmt.Fprint(w, e.Text)
 		}
@@ -768,9 +776,16 @@ func (t *task) sink(e agent.Event) {
 		}
 		t.mu.Unlock()
 	case agent.EventToolStart:
+		t.mu.Lock()
+		t.tool = e.ToolName
+		t.mu.Unlock()
+		t.syncStream()
 		t.renderToolStart(e)
 		t.r.human(chlog.Event{Kind: "tool_start", Session: t.key, Channel: t.msg.Channel, Tool: e.ToolName, Text: e.ToolArgs})
 	case agent.EventToolEnd:
+		t.mu.Lock()
+		t.tool = ""
+		t.mu.Unlock()
 		t.renderToolEnd(e)
 		t.r.human(chlog.Event{Kind: "tool_end", Session: t.key, Channel: t.msg.Channel, Tool: e.ToolName, Text: e.Result.Text})
 	case agent.EventTurnEnd:

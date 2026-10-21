@@ -12,6 +12,7 @@ const (
 	KindReply  = "reply"
 	KindNotice = "notice"
 	KindError  = "error"
+	KindTyping = "typing"
 )
 
 const (
@@ -50,7 +51,14 @@ type OutboundMessage struct {
 	Content string     `json:"content,omitempty"`
 	Media   []MediaRef `json:"media,omitempty"`
 	Kind    string     `json:"kind,omitempty"`
+	Stream  string     `json:"stream,omitempty"`
+	Seq     int        `json:"seq,omitempty"`
+	Final   bool       `json:"final,omitempty"`
 }
+
+func (m OutboundMessage) IsStreamUpdate() bool { return m.Stream != "" }
+
+func (m OutboundMessage) IsStreamFinal() bool { return m.Stream != "" && m.Final }
 
 type Counters struct {
 	Inbound         uint64    `json:"inbound"`

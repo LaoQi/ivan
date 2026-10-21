@@ -191,12 +191,26 @@ func cmdSend(args []string) int {
 		}
 		wait = d
 	}
-	reply, err := cli.Send(cfg.SocketPath(), text, f.values["session"], wait)
+	var (
+		progress bool
+		onChunk  func(string)
+	)
+	if ctty.IsTerminal(int(os.Stdout.Fd())) {
+		progress = true
+		onChunk = func(text string) {
+			fmt.Printf("\r\033[2K%s", lastLine(text))
+			_ = os.Stdout.Sync()
+		}
+	}
+	reply, err := cli.SendStream(cfg.SocketPath(), text, f.values["session"], wait, onChunk)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 	if reply != "" {
+		if progress {
+			fmt.Print("\r\033[2K")
+		}
 		fmt.Println(reply)
 	}
 	return 0
@@ -598,6 +612,10 @@ func printStatus(st daemon.Status) {
 	for _, c := range st.Channels {
 		line := fmt.Sprintf("channel   %s running=%v max_len=%d sent=%d failed=%d unmatched=%d",
 			c.Name, c.Running, c.MaxLen, c.Sent, c.Failed, c.Unmatched)
+		if c.StreamSent > 0 || c.StreamUpd > 0 || c.StreamFinal > 0 || c.StreamFail > 0 || c.Typing > 0 || c.StreamSkip > 0 {
+			line += fmt.Sprintf(" stream=%d upd=%d final=%d skip=%d fail=%d typing=%d",
+				c.StreamSent, c.StreamUpd, c.StreamFinal, c.StreamSkip, c.StreamFail, c.Typing)
+		}
 		if c.LastError != "" {
 			line += fmt.Sprintf(" last_error=%q", c.LastError)
 		}
@@ -639,4 +657,9 @@ func lastDrop(c bus.Counters) string {
 		return ""
 	}
 	return " last_drop=" + c.LastDrop.Format(time.RFC3339)
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return lines[len(lines)-1]
 }

@@ -65,6 +65,17 @@ Inbound → runner.dispatch(msg)
 - 为什么不做注入/工具：注入会吃掉上下文并破坏缓存，专用 `remember` 工具只省一次 shell 调用却多一份维护面；shell + 路径约定足够，且人可以直接编辑同一批文件。
 - 记忆文件不自动创建/裁剪（首期）：避免长歪的自动摘要污染；需要时由人清理。
 
+## 7.1 中间态投递（2026-10-22 实现）
+
+回合执行期间由 `runner` 侧的 `streamState` 负责让用户看到"还在跑"，形态是**一条消息原地更新**，不做逐里程碑的进度消息：
+
+- 逻辑消息 id 形如 `<会话键>#<自增序号>`，整条回复只占一条消息（`Stream` 字段，经总线到 `Manager`）。
+- 正文就绪前（模型思考/工具执行）用"输入中"（`KindTyping`）覆盖静默期，间隔 45s 一次；正文就绪后按 `stream_every_seconds`（默认 1s）流式跟进，正文变化即时推送（不额外等待节流）。
+- 内容达到 `stream_max_chars`（默认 1200）后停流，收尾时把余下内容作为普通消息补发（不丢内容）。
+- 回合结束由 `streamState.finish` 投递终局（带原始 `Kind`），失败/取消同样收尾。
+- 配置：`runner.stream`（总开关）、`stream_first_seconds`、`stream_every_seconds`、`stream_max_chars`，按通道可用 `channels.<name>.stream` 单独关（默认 cli/qq 都开）。
+- 覆盖范围：只对**用户主动消息**生效；定时作业回投走直投路径，不做流式（`direct` 分支）。
+
 ## 8 验收
 
 - 同一 QQ 单聊连续对话共享历史；重启 daemon 后继续对话历史不丢。

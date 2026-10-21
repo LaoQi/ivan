@@ -35,6 +35,9 @@ const (
 	DefaultJobTimeoutSeconds  = 900
 	DefaultHandoffHintTokens  = 180000
 	DefaultHandoffForceTokens = 256000
+	DefaultStreamFirstSeconds = 3
+	DefaultStreamEverySeconds = 1
+	DefaultStreamMaxChars     = 1200
 )
 
 type RunnerConfig struct {
@@ -47,6 +50,10 @@ type RunnerConfig struct {
 	MemoryMaxBytes     int  `yaml:"memory_max_bytes"`
 	MaxAgents          int  `yaml:"max_agents"`
 	IdleTimeoutMinutes int  `yaml:"idle_timeout_minutes"`
+	Stream             bool `yaml:"stream"`
+	StreamFirstSeconds int  `yaml:"stream_first_seconds"`
+	StreamEverySeconds int  `yaml:"stream_every_seconds"`
+	StreamMaxChars     int  `yaml:"stream_max_chars"`
 }
 
 type DaemonConfig struct {
@@ -59,6 +66,7 @@ type DaemonConfig struct {
 
 type CLIConfig struct {
 	Enabled bool `yaml:"enabled"`
+	Stream  bool `yaml:"stream"`
 }
 
 type QQConfig struct {
@@ -71,6 +79,9 @@ type QQConfig struct {
 	AllowFrom       []string `yaml:"allow_from"`
 	AllowGroups     []string `yaml:"allow_groups"`
 	MaxMessageLen   int      `yaml:"max_message_len"`
+	Stream          bool     `yaml:"stream"`
+	StreamMaxLen    int      `yaml:"stream_max_len"`
+	Typing          bool     `yaml:"typing"`
 	AllowProactive  bool     `yaml:"allow_proactive"`
 	ReconnectMaxSec int      `yaml:"reconnect_max_sec"`
 }
@@ -126,6 +137,10 @@ func Default() *Config {
 			MaxTurnsPerTask:    8,
 			MaxAgents:          DefaultMaxAgents,
 			IdleTimeoutMinutes: DefaultIdleMinutes,
+			Stream:             true,
+			StreamFirstSeconds: DefaultStreamFirstSeconds,
+			StreamEverySeconds: DefaultStreamEverySeconds,
+			StreamMaxChars:     DefaultStreamMaxChars,
 		},
 		Daemon: DaemonConfig{
 			Socket:                 DefaultSocket,
@@ -135,8 +150,11 @@ func Default() *Config {
 			SendTimeoutSeconds:     DefaultSendSeconds,
 		},
 		Channels: ChannelsConfig{
-			CLI: CLIConfig{Enabled: true},
-			QQ:  QQConfig{MaxMessageLen: 1200, ReconnectMaxSec: 60},
+			CLI: CLIConfig{Enabled: true, Stream: true},
+			QQ: QQConfig{
+				MaxMessageLen: 1200, Stream: true, StreamMaxLen: 1200, Typing: true,
+				ReconnectMaxSec: 60,
+			},
 		},
 		Schedule: ScheduleConfig{
 			Enabled:           true,
@@ -243,11 +261,23 @@ func (c *Config) normalize() {
 	if c.Runner.MaxTurnsPerTask <= 0 {
 		c.Runner.MaxTurnsPerTask = 8
 	}
+	if c.Runner.StreamFirstSeconds < 0 {
+		c.Runner.StreamFirstSeconds = DefaultStreamFirstSeconds
+	}
+	if c.Runner.StreamEverySeconds <= 0 {
+		c.Runner.StreamEverySeconds = DefaultStreamEverySeconds
+	}
+	if c.Runner.StreamMaxChars <= 0 {
+		c.Runner.StreamMaxChars = DefaultStreamMaxChars
+	}
 	if c.Channels.QQ.MaxMessageLen <= 0 {
 		c.Channels.QQ.MaxMessageLen = 1200
 	}
 	if c.Channels.QQ.ReconnectMaxSec <= 0 {
 		c.Channels.QQ.ReconnectMaxSec = 60
+	}
+	if c.Channels.QQ.StreamMaxLen <= 0 {
+		c.Channels.QQ.StreamMaxLen = 1200
 	}
 	if strings.TrimSpace(c.Schedule.JobsDB) == "" {
 		c.Schedule.JobsDB = DefaultJobsDB
@@ -296,6 +326,29 @@ func (c *Config) IdleTimeout() time.Duration {
 }
 
 func (c *Config) CLIEnabled() bool { return c.Channels.CLI.Enabled }
+
+// StreamEnabled 按通道决定是否启用中间态投递（原地更新的流式消息）。
+func (c *Config) StreamEnabled(channel string) bool {
+	if !c.Runner.Stream {
+		return false
+	}
+	switch channel {
+	case "cli":
+		return c.Channels.CLI.Stream
+	case "qq":
+		return c.Channels.QQ.Stream
+	default:
+		return false
+	}
+}
+
+func (c *Config) StreamFirst() time.Duration {
+	return time.Duration(c.Runner.StreamFirstSeconds) * time.Second
+}
+
+func (c *Config) StreamEvery() time.Duration {
+	return time.Duration(c.Runner.StreamEverySeconds) * time.Second
+}
 
 func (c *Config) QQEnabled() bool {
 	return c.Channels.QQ.Enabled

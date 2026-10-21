@@ -394,3 +394,90 @@ func TestMediaNamesDoNotCollide(t *testing.T) {
 		t.Fatal("不同消息 id 应得到不同文件名")
 	}
 }
+
+type streamCall struct {
+	path string
+	body map[string]any
+}
+
+func TestStreamOpenDirectOnly(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Stream = true })
+	if _, ok := ch.translate(directEvent("m-1", "u-1", "hi")); !ok {
+		t.Fatal("translate 失败")
+	}
+	h, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{ChatID: "u-1", ReplyTo: "m-1"})
+	if err != nil {
+		t.Fatalf("StreamOpen: %v", err)
+	}
+	if h == nil {
+		t.Fatal("未返回流句柄")
+	}
+	if err := h.Update(context.Background(), "正文", true); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	calls := f.calls()
+	if len(calls) != 2 {
+		t.Fatalf("请求数 %d，期望 2", len(calls))
+	}
+	if calls[0]["msg_seq"] != float64(1) || calls[0]["msg_id"] != "m-1" {
+		t.Fatalf("首片被动回复字段异常: %+v", calls[0])
+	}
+	if calls[1]["input_state"] != float64(10) {
+		t.Fatalf("结束片未带 input_state=10: %+v", calls[1])
+	}
+	paths := f.paths
+	if paths[0] != "/v2/users/u-1/stream_messages" {
+		t.Fatalf("路径异常: %s", paths[0])
+	}
+}
+
+func TestStreamOpenRejectsGroupAndDisabled(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Stream = true })
+	if _, ok := ch.translate(groupEvent("m-1", "g-1", "u-1", "hi")); !ok {
+		t.Fatal("translate 失败")
+	}
+	if _, err := ch.StreamOpen(context.Background(), bus.OutboundMessage{ChatID: "g-1"}); err == nil {
+		t.Fatal("群聊应拒绝流式")
+	}
+	off := newTestChannel(t, f, func(c *Config) { c.Stream = false })
+	if _, err := off.StreamOpen(context.Background(), bus.OutboundMessage{ChatID: "u-1"}); err == nil {
+		t.Fatal("关闭流式后应报错")
+	}
+}
+
+func TestTypingRespectsQuotaReserve(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, func(c *Config) { c.Typing = true })
+	if _, ok := ch.translate(directEvent("m-9", "u-9", "hi")); !ok {
+		t.Fatal("translate 失败")
+	}
+	msg := bus.OutboundMessage{ChatID: "u-9", ReplyTo: "m-9"}
+	for i := 0; i < typingReserve; i++ {
+		if err := ch.Typing(context.Background(), msg); err != nil {
+			t.Fatalf("第 %d 次输入状态失败: %v", i+1, err)
+		}
+	}
+	if err := ch.Typing(context.Background(), msg); err == nil {
+		t.Fatal("额度不足时应跳过输入状态")
+	}
+	calls := f.calls()
+	if len(calls) != typingReserve {
+		t.Fatalf("输入状态请求数 %d，期望 %d", len(calls), typingReserve)
+	}
+	if calls[0]["msg_type"] != float64(qqbot.MsgTypeInput) {
+		t.Fatalf("msg_type 异常: %+v", calls[0])
+	}
+	if calls[0]["msg_seq"] != float64(1) {
+		t.Fatalf("输入状态未占用被动序号: %+v", calls[0])
+	}
+}
+
+func TestStreamMaxLenDefault(t *testing.T) {
+	f := newFakeAPI(t)
+	ch := newTestChannel(t, f, nil)
+	if got := ch.StreamMaxLen(); got != DefaultStreamLen {
+		t.Fatalf("StreamMaxLen=%d，期望 %d", got, DefaultStreamLen)
+	}
+}

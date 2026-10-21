@@ -12,7 +12,10 @@ import (
 	"github.com/LaoQi/ivan/bus"
 )
 
-const DefaultMaxLen = 1200
+const (
+	DefaultMaxLen      = 1200
+	DefaultStreamLimit = 1200
+)
 
 var ErrUnroutable = errors.New("出站消息没有投递目标")
 
@@ -27,6 +30,10 @@ type Limiter interface {
 	MaxLen() int
 }
 
+type StreamLimit interface {
+	StreamMaxLen() int
+}
+
 type Status struct {
 	Name        string    `json:"name"`
 	Running     bool      `json:"running"`
@@ -34,30 +41,46 @@ type Status struct {
 	Sent        int       `json:"sent"`
 	Failed      int       `json:"failed"`
 	Unmatched   int       `json:"unmatched"`
+	StreamSent  int       `json:"stream_sent,omitempty"`
+	StreamUpd   int       `json:"stream_update,omitempty"`
+	StreamSkip  int       `json:"stream_skip,omitempty"`
+	StreamFail  int       `json:"stream_fail,omitempty"`
+	StreamFinal int       `json:"stream_final,omitempty"`
+	Typing      int       `json:"typing,omitempty"`
+	TypingFail  int       `json:"typing_fail,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
 	LastErrorAt time.Time `json:"last_error_at,omitempty"`
 }
 
 type chanStat struct {
-	running   bool
-	maxLen    int
-	sent      int
-	failed    int
-	unmatched int
-	lastErr   string
-	lastErrAt time.Time
+	running     bool
+	maxLen      int
+	sent        int
+	failed      int
+	unmatched   int
+	streamSent  int
+	streamUpd   int
+	streamSkip  int
+	streamFail  int
+	streamFinal int
+	typing      int
+	typingFail  int
+	lastErr     string
+	lastErrAt   time.Time
 }
 
 type Manager struct {
-	bus         *bus.Bus
-	retries     int
-	retryDelay  time.Duration
-	sendTimeout time.Duration
+	bus           *bus.Bus
+	retries       int
+	retryDelay    time.Duration
+	sendTimeout   time.Duration
+	streamTimeout time.Duration
 
 	mu      sync.Mutex
 	order   []string
 	chans   map[string]Channel
 	status  map[string]*chanStat
+	streams *streamTable
 	drained chan struct{}
 	once    sync.Once
 }
@@ -86,13 +109,15 @@ func WithSendTimeout(d time.Duration) Option {
 
 func New(b *bus.Bus, opts ...Option) *Manager {
 	m := &Manager{
-		bus:         b,
-		retries:     2,
-		retryDelay:  200 * time.Millisecond,
-		sendTimeout: 10 * time.Second,
-		chans:       map[string]Channel{},
-		status:      map[string]*chanStat{},
-		drained:     make(chan struct{}),
+		bus:           b,
+		retries:       2,
+		retryDelay:    200 * time.Millisecond,
+		sendTimeout:   10 * time.Second,
+		streamTimeout: 10 * time.Second,
+		chans:         map[string]Channel{},
+		status:        map[string]*chanStat{},
+		streams:       newStreamTable(),
+		drained:       make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(m)
@@ -201,6 +226,12 @@ func (m *Manager) Route(ctx context.Context, msg bus.OutboundMessage) error {
 	}
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.sendTimeout)
 	defer cancel()
+	if msg.Kind == bus.KindTyping {
+		return m.routeTyping(ctx, name, c, msg)
+	}
+	if msg.IsStreamUpdate() {
+		return m.routeStream(ctx, name, c, msg)
+	}
 	parts := Split(Sanitize(msg.Content), st.maxLen)
 	var (
 		firstErr error
@@ -273,6 +304,13 @@ func (m *Manager) Status() []Status {
 			Sent:        st.sent,
 			Failed:      st.failed,
 			Unmatched:   st.unmatched,
+			StreamSent:  st.streamSent,
+			StreamUpd:   st.streamUpd,
+			StreamSkip:  st.streamSkip,
+			StreamFail:  st.streamFail,
+			StreamFinal: st.streamFinal,
+			Typing:      st.typing,
+			TypingFail:  st.typingFail,
 			LastError:   st.lastErr,
 			LastErrorAt: st.lastErrAt,
 		})

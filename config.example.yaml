@@ -46,6 +46,15 @@ runner:
   max_agents: 8
   # 空闲实例回收时间（分钟）
   idle_timeout_minutes: 30
+  # 中间态投递（默认开）：整条回复只占一条消息，通道支持流式时原位更新，
+  # 目的是让用户看到“还在跑”，不做逐里程碑的进度消息；按通道可用 channels.*.stream 单独关
+  stream: true
+  # 静默期（首个中间态）阈值（秒，0 = 立即）
+  stream_first_seconds: 3
+  # 流式正文更新间隔（秒）
+  stream_every_seconds: 1
+  # 单条消息内流式展示的正文上限（字符），超出后收尾并补发余下内容
+  stream_max_chars: 1200
 
 # 常驻进程（见 docs/channels.md）
 daemon:
@@ -75,6 +84,8 @@ channels:
   # 本地 cli 通道（unix socket，ivan send/status 用它）
   cli:
     enabled: true
+    # 前台 `ivan send` 显示增量（TTY 下同屏刷新）
+    stream: true
   # QQ 官方机器人通道（见 docs/qq-bot.md）
   qq:
     enabled: false
@@ -86,6 +97,12 @@ channels:
     allow_groups: []
     # 出站切分上限（通用切分器生效；cli 通道不切分）
     max_message_len: 1200
+    # 单聊流式消息（官方 /stream_messages，原地更新同一条消息）；群聊官方不支持，自动退化
+    stream: true
+    # 流式消息内正文上限（字符）
+    stream_max_len: 1200
+    # 正文出现前用 msg_type=6“输入中”覆盖静默期（会占一次被动回复额度，剩余额度不足时自动跳过）
+    typing: true
     # 被动回复窗口用尽后是否允许转为主动消息（平台频控 + 用户可关闭）
     allow_proactive: false
     # 网关重连指数退避上限（秒）
