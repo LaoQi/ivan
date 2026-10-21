@@ -686,8 +686,9 @@ func (s *Scheduler) clearDeferred(id string) {
 
 func brief(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 240 {
-		return s[:240] + "…"
+	r := []rune(s)
+	if len(r) > 240 {
+		return string(r[:240]) + "…"
 	}
 	return s
 }

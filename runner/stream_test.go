@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LaoQi/ivan/bus"
 	chlog "github.com/LaoQi/ivan/channel/log"
@@ -223,5 +224,97 @@ func TestStreamFinalKeepsErrorKind(t *testing.T) {
 	last := got[len(got)-1]
 	if last.Kind != bus.KindError {
 		t.Fatalf("失败回合应以 error 类型收尾: %+v", last)
+	}
+}
+
+// 回归：中文正文按字节判定、按 rune 切片会 panic（slice bounds out of range）。
+// 线上曾因此在 >400 汉字时崩溃重启，直接吞掉整个回合。
+func TestStreamPushClipsChineseByRune(t *testing.T) {
+	cfg := streamConfig(t, "http://127.0.0.1:1")
+	cfg.Runner.StreamMaxChars = 64 // 调小上限，确保覆盖“超限被裁”路径
+	r, err := New(Options{Cfg: cfg, Human: chlog.New(io.Discard)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer r.Close()
+	sk := newSink()
+	r.opts.Notify = sk.notify
+
+	st := newStreamState(r, bus.OutboundMessage{Channel: "cli", ChatID: "c1"}, "s#1")
+	defer func() {
+		st.stopOnce.Do(func() { close(st.stop) })
+		<-st.done
+	}()
+
+	limit := cfg.Runner.StreamMaxChars
+	cases := []string{
+		strings.Repeat("字", 768),     // 恰为旧 bug 的崩溃形态（768 rune / 2304 字节）
+		strings.Repeat("中", 5000),    // 远超上限
+		strings.Repeat("a", 5000),    // 纯 ASCII 超上限
+		strings.Repeat("汉", limit),   // 恰好等于上限
+		strings.Repeat("汉", limit+1), // 超上限一字
+	}
+	for _, text := range cases {
+		st.set(text)
+		st.push(time.Now())
+	}
+	got := sk.wait(t, time.Second, func(m []bus.OutboundMessage) bool { return len(m) > 0 })
+	if len(got) == 0 {
+		t.Fatal("应投递中间态")
+	}
+	for _, m := range got {
+		if bus.RuneLen(m.Content) > limit {
+			t.Fatalf("中间态超上限: %d 字符（上限 %d）", bus.RuneLen(m.Content), limit)
+		}
+		if strings.ContainsRune(m.Content, utf8.RuneError) {
+			t.Fatalf("按字节截断产生了乱码")
+		}
+	}
+	// 最后一例超限一字，必须被裁到恰好 limit 个字符（不截断则此处暴露）
+	if last := got[len(got)-1]; bus.RuneLen(last.Content) != limit {
+		t.Fatalf("超限正文应被裁到 %d 字符，实际 %d", limit, bus.RuneLen(last.Content))
+	}
+}
+
+// 回归：长中文回复的整条链路不得 panic，且终局内容完整（不因中间态截断而丢正文）。
+func TestStreamLongChineseTurnSurvives(t *testing.T) {
+	long := strings.Repeat("这是一段很长的中文回复内容。", 60) // 780 字，超旧 bug 的 400 字阈值
+	srv := fakellm.New(fakellm.Step{Content: long})
+	defer srv.Close()
+	cfg := streamConfig(t, srv.BaseURL())
+	r, err := New(Options{Cfg: cfg, Human: chlog.New(io.Discard)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer r.Close()
+	sk := newSink()
+	r.opts.Notify = sk.notify
+	if err := r.Dispatch(context.Background(), inbound("cli:default", "r1", "说点长的")); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	got := sk.wait(t, 3*time.Second, func(m []bus.OutboundMessage) bool {
+		return len(m) > 0 && m[len(m)-1].Final
+	})
+	last := got[len(got)-1]
+	if !last.Final {
+		t.Fatal("未收到终局")
+	}
+	if last.Content != long {
+		t.Fatalf("终局正文被截断: got %d 字符，want %d", bus.RuneLen(last.Content), bus.RuneLen(long))
+	}
+}
+
+func TestClipTextRuneSemantics(t *testing.T) {
+	if got := clipText("中文内容", 0); got != "中文内容" {
+		t.Fatalf("limit<=0 不应截断: %q", got)
+	}
+	if got := clipText("中文内容", 2); got != "中文" {
+		t.Fatalf("应按字符截断: %q", got)
+	}
+	if got := clipText("ab", 5); got != "ab" {
+		t.Fatalf("未超限应原样: %q", got)
+	}
+	if got := clipText(strings.Repeat("中", 10), 3); got != "中中中" {
+		t.Fatalf("中文应切 3 字: %q", got)
 	}
 }

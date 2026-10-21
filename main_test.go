@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LaoQi/ivan/channel/cli"
 	"github.com/LaoQi/ivan/config"
@@ -235,5 +236,17 @@ func TestDispatchMeta(t *testing.T) {
 	}
 	if _, done := dispatchMeta([]string{"send"}); done {
 		t.Fatal("send 不应由 meta 处理")
+	}
+}
+
+func TestClipUsesRune(t *testing.T) {
+	if got := clip("中文内容", 2); got != "中文…" {
+		t.Fatalf("应按字符截断: %q", got)
+	}
+	if got := clip("中文", 10); got != "中文" {
+		t.Fatalf("未超限应原样: %q", got)
+	}
+	if got := clip(strings.Repeat("字", 100), 40); strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatal("按字节切分产生了乱码")
 	}
 }

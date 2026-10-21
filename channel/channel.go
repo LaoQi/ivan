@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	DefaultMaxLen      = 1200
-	DefaultStreamLimit = 1200
+	DefaultMaxLen      = 2048
+	DefaultStreamLimit = 2048
 )
 
 var ErrUnroutable = errors.New("出站消息没有投递目标")

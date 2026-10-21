@@ -230,10 +230,16 @@ func skipEvery(planned, every, nowMS int64) (int64, int) {
 	return next, missed
 }
 
+// oneLine 折叠空白为单行并按字符（rune）截断。
+// schedule 只依赖标准库（抽库纪律），故不引 bus 的同类助手。
 func oneLine(s string, limit int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if limit > 0 && len(s) > limit {
-		return s[:limit] + "…"
+	if limit <= 0 {
+		return s
 	}
-	return s
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "…"
 }

@@ -54,7 +54,7 @@ runner:
   # 流式正文更新间隔（秒）
   stream_every_seconds: 1
   # 单条消息内流式展示的正文上限（字符），超出后收尾并补发余下内容
-  stream_max_chars: 1200
+  stream_max_chars: 2048
 
 # 常驻进程（见 docs/channels.md）
 daemon:
@@ -96,7 +96,7 @@ channels:
     allow_from: []
     allow_groups: []
     # 出站切分上限（通用切分器生效；cli 通道不切分）
-    max_message_len: 1200
+    max_message_len: 2048
     # 出站 Markdown（msg_type=2）：仅当正文含 markdown 语法特征时才用，
     # 表格转要点行、代码围栏转缩进（官方 Markdown 页未列这两项）、本地图片转文字说明；
     # 被平台以 markdown 内容不可用拒收时自动退回纯文本重发
@@ -104,7 +104,7 @@ channels:
     # 单聊流式消息（官方 /stream_messages，原地更新同一条消息）；群聊官方不支持，自动退化
     stream: true
     # 流式消息内正文上限（字符）
-    stream_max_len: 1200
+    stream_max_len: 2048
     # 正文出现前用 msg_type=6“输入中”覆盖静默期（会占一次被动回复额度，剩余额度不足时自动跳过）
     typing: true
     # 被动回复窗口用尽后是否允许转为主动消息（平台频控 + 用户可关闭）

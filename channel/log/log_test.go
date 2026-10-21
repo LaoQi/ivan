@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type failWriter struct{}
@@ -46,8 +47,16 @@ func TestFormatMultilineAndTruncate(t *testing.T) {
 	}
 	buf.Reset()
 	_ = s.Emit(Event{Kind: "tool_end", Tool: "run_shell", Text: strings.Repeat("字", 500)})
-	if len(buf.String()) > 400 {
-		t.Fatalf("未截断: %d", len(buf.String()))
+	// 长度按字符（rune）计：500 字应被裁到 textLimit 个字符 + 省略号
+	line = buf.String()
+	if !strings.Contains(line, strings.Repeat("字", textLimit)+"…") {
+		t.Fatalf("应按字符截断到 %d 字: %q", textLimit, line)
+	}
+	if got := utf8.RuneCountInString(line); got > textLimit+80 {
+		t.Fatalf("整行字符数异常: %d", got)
+	}
+	if strings.ContainsRune(line, utf8.RuneError) {
+		t.Fatalf("按字节切分产生了乱码: %q", line)
 	}
 	if s.Lines() != 2 {
 		t.Fatalf("行计数异常: %d", s.Lines())

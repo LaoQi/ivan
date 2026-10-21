@@ -117,9 +117,7 @@ func (s *streamState) set(text string) {
 func (s *streamState) push(now time.Time) {
 	s.mu.Lock()
 	text := strings.TrimSpace(s.text)
-	if len(text) > s.maxLen {
-		text = string([]rune(text)[:s.maxLen])
-	}
+	text = clipText(text, s.maxLen)
 	last, sentAt, typingAt := s.sent, s.sentAt, s.typingAt
 	s.mu.Unlock()
 
@@ -181,14 +179,7 @@ func (s *streamState) finish(out bus.OutboundMessage) error {
 }
 
 func clipText(text string, limit int) string {
-	if limit <= 0 {
-		return text
-	}
-	r := []rune(text)
-	if len(r) <= limit {
-		return text
-	}
-	return string(r[:limit])
+	return bus.Truncate(text, limit)
 }
 
 // publish 投递中间态/终局：优先走总线（与默认出站同一条路径），无总线时直投钩子。

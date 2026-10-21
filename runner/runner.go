@@ -858,11 +858,7 @@ func briefErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	s := strings.Join(strings.Fields(err.Error()), " ")
-	if len(s) > 300 {
-		s = s[:300] + "…"
-	}
-	return s
+	return bus.Clip(strings.Join(strings.Fields(err.Error()), " "), 300)
 }
 
 func sessionName(path string) string {
@@ -877,10 +873,5 @@ func sessionName(path string) string {
 }
 
 func oneLine(s string, limit int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > limit {
-		s = s[:limit] + "…"
-	}
-	return s
+	return bus.OneLine(s, limit)
 }

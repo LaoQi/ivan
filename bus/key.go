@@ -61,9 +61,9 @@ func KeySlug(key string) string {
 	if name == "" {
 		name = "session"
 	}
-	if len(name) > slugLimit {
+	if RuneLen(name) > slugLimit {
 		sum := sha256.Sum256([]byte(key))
-		name = name[:slugLimit] + "-" + hex.EncodeToString(sum[:4])
+		name = Truncate(name, slugLimit) + "-" + hex.EncodeToString(sum[:4])
 	}
 	return name
 }

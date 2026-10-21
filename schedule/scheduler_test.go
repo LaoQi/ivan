@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type fakeClock struct {
@@ -654,5 +655,23 @@ func TestDailyTimezoneRespected(t *testing.T) {
 	want := time.Date(2026, 10, 20, 20, 0, 0, 0, loc).UnixMilli()
 	if next != want || missed != 0 {
 		t.Fatalf("next=%s missed=%d，期望 %s", FromMS(next).Format(time.RFC3339), missed, FromMS(want).Format(time.RFC3339))
+	}
+}
+
+// 文本长度一律按字符（rune）计：中文标签/错误文案不得被按字节切断。
+func TestOneLineAndBriefUseRune(t *testing.T) {
+	if got := oneLine("中文标签", 2); got != "中文…" {
+		t.Fatalf("oneLine 应按字符截断: %q", got)
+	}
+	if got := oneLine("短", 0); got != "短" {
+		t.Fatalf("limit<=0 不应截断: %q", got)
+	}
+	long := strings.Repeat("字", 500)
+	got := brief(long)
+	if n := utf8.RuneCountInString(got); n != 241 {
+		t.Fatalf("brief 结果字符数=%d，期望 241", n)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatal("brief 按字节切分产生了乱码")
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/LaoQi/ivan/bus"
 )
 
 const textLimit = 200
@@ -115,21 +117,12 @@ func format(e Event) string {
 }
 
 func quote(s string) string {
-	s = strings.TrimSpace(oneLine(s))
+	s = bus.OneLine(s, textLimit)
 	if s == "" {
 		return ""
-	}
-	if len(s) > textLimit {
-		s = s[:textLimit] + "…"
 	}
 	if strings.ContainsAny(s, " \t") {
 		return fmt.Sprintf("%q", s)
 	}
 	return s
-}
-
-func oneLine(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return strings.Join(strings.Fields(s), " ")
 }

@@ -21,8 +21,8 @@ import (
 
 const (
 	Name              = "qq"
-	DefaultMaxLen     = 1200
-	DefaultStreamLen  = 1200
+	DefaultMaxLen     = 2048
+	DefaultStreamLen  = 2048
 	DefaultTypingSecs = 60
 	DefaultMediaMB    = 20
 )
@@ -570,8 +570,9 @@ func idDigest(id string) string {
 
 func shortID(id string) string {
 	id = strings.TrimSpace(id)
-	if len(id) <= 8 {
+	r := []rune(id)
+	if len(r) <= 8 {
 		return id
 	}
-	return id[:8]
+	return string(r[:8])
 }

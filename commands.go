@@ -504,10 +504,7 @@ func statusOf(j schedule.Job) string {
 }
 
 func clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
+	return bus.Clip(s, n)
 }
 
 func cmdCancel(args []string) int {

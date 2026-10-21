@@ -81,7 +81,7 @@ channel/qq/       适配器：qqbot 事件 → bus.InboundMessage；bus.Outbound
   ④全部分片完成后 `POST .../files` 传 `{file_type, file_name, upload_id, srv_send_msg:false}` 合并 → `file_info`。
   **实测坑**：`parts[].index` **从 1 开始**（文档写"从 0 开始"）→ 不能用 `index × block_size` 算偏移，必须按 index 排序后**顺序累计**切分，
   否则首片为空、合并报 `40034002 富媒体文件格式不支持`。
-- 消息长度：官方未给硬上限（picoclaw 配置用 2000），本期按 `max_message_len`（默认 1200）保守切分，走通用切分器（见 `docs/channels.md` §6）。
+- 消息长度：官方未给硬上限（picoclaw 配置用 2000），本期按 `max_message_len`（默认 **2048**）保守切分，走通用切分器（见 `docs/channels.md` §6）。
 - 图片上传（已核对）：`POST /v2/users/{user_openid}/files`（50 QPS）与 `/v2/groups/{group_openid}/files`；`file_type: 1` 图片（png/jpg），软限制 20MB / 硬限制 200MB；三种传法——`file_data`（base64）≤5MB、`url`（http 开头，平台转存）、分片（`upload_prepare` → 分片 `PUT` → `upload_part_finish` → `files` 合并，见 §6）；`srv_send_msg: false` 只返回 `file_info`，再以 `msg_type: 7` + `media.file_info` 发。
   **实测补充**：除体积外还有**像素尺寸**限制——700×3486（2.44M 像素）的合法 PNG 被拒 `850019/40034002 富媒体文件格式不支持`，1300×1300 与 1300×1600 均正常。
 - 限流：发送失败带平台错误码时，区分「限流」「权限不足」「参数错误」「凭证失效」，分别退避重试 / 直接失败 / 记录待查。
@@ -103,7 +103,7 @@ channels:
     sandbox: true           # true 走沙箱域名
     allow_from: []          # 允许的 openid 白名单，空 = 允许所有（首期建议非空）
     allow_groups: []        # 允许的 group_openid 白名单
-    max_message_len: 1200
+    max_message_len: 2048
     allow_proactive: false  # 超被动窗口是否允许主动消息
     reconnect_max_sec: 60
 ```
@@ -189,7 +189,7 @@ channels:
 
 ## 12.1 流式实现（2026-10-22）
 
-`qqbot/stream.go`：`OpenStream`（首片 `input_state=1, index=0`）/ `Stream.Update`（`replace` 全量、`done` 时 `input_state=10`）/ `Client.Typing`；协议细节（分片序号、`stream_msg_id` 传递、`input_state`）全部留在协议包内。`channel/qq` 实现 `channel.StreamOpener` 与 `channel.Typist`：单聊开流（群聊明确报错 → Manager 退化）、`StreamMaxLen()`（`stream_max_len`，默认 1200）、`Typing` 前检查被动额度剩余（`typingReserve=2`，不足则跳过）。配置：`channels.qq.stream`、`stream_max_len`、`typing`。**未做真机验证**（按用户口径"配额按文档默认参数限制、可配置、不做测试"）：分片是否计被动额度、`remain_msg_len` 实际取值待真机时确认；实现上已做两处保守处理——流式分片共用一个 `msg_id`/`msg_seq`（首片取一次被动序号），`input_notify` 在额度不足时跳过。
+`qqbot/stream.go`：`OpenStream`（首片 `input_state=1, index=0`）/ `Stream.Update`（`replace` 全量、`done` 时 `input_state=10`）/ `Client.Typing`；协议细节（分片序号、`stream_msg_id` 传递、`input_state`）全部留在协议包内。`channel/qq` 实现 `channel.StreamOpener` 与 `channel.Typist`：单聊开流（群聊明确报错 → Manager 退化）、`StreamMaxLen()`（`stream_max_len`，默认 2048）、`Typing` 前检查被动额度剩余（`typingReserve=2`，不足则跳过）。配置：`channels.qq.stream`、`stream_max_len`、`typing`。**未做真机验证**（按用户口径"配额按文档默认参数限制、可配置、不做测试"）：分片是否计被动额度、`remain_msg_len` 实际取值待真机时确认；实现上已做两处保守处理——流式分片共用一个 `msg_id`/`msg_seq`（首片取一次被动序号），`input_notify` 在额度不足时跳过。
 
 ## 13 P2 实现记录（2026-10-20）
 
@@ -222,7 +222,7 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 - 入站：`C2C_MESSAGE_CREATE`→`ChatType=direct`（`ChatID=user_openid`）、`GROUP_AT_MESSAGE_CREATE`→`group`（`ChatID=group_openid`，`Mentioned=true`）；`Raw` 带 `msg_id`；白名单（`allow_from`/`allow_groups`，空=放行）；附件下载到 `media/` 转 `MediaRef`（`MediaMaxBytes` 截断、0600）。
 - 出站：解析目标（优先用入站登记的 openid/group）；**`msg_seq` 以入站 `msg_id` 为键**计数，单聊窗口 60 分钟/上限 4、群聊 5 分钟/上限 5，超限且未开 `allow_proactive` 则报错；有 `msg_id` 走被动回复，否则（`allow_proactive`）走主动消息。
 - 图片：出站先 `/files` 上传（`file_type:1`、`srv_send_msg:false`）取 `file_info`，再 `msg_type:7` 发送；`≤5MB` 走 `file_data` 内联，`>5MB` 走**四步分片上传**（`upload_prepare` → 逐片 `PUT` → `upload_part_finish` → `files` 合并，见 §13.1；分片 `index` 实测从 **1** 开始）；媒体上限默认 20MB。
-- `MaxLen()=max_message_len`（默认 1200），出站走通用切分器。
+- `MaxLen()=max_message_len`（默认 2048），出站走通用切分器。
 
 ### 13.3 测试
 

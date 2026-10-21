@@ -12,6 +12,7 @@
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 tanya（`bus`+`channel` 抽库时成对抽出）
 - **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
+- **文本长度一律按字符（rune）计**：`bus.RuneLen/Clip/Truncate/OneLine` 是唯一口径（`clip`/`options`/`brief`/`oneLine`/`quote`/`shortID`/`KeySlug`/`taskSlug` 一律按字符截断）；**不得用 `len(s)` 判定文本长度、不得用 `s[:n]` 切文本**（中文 3 字节/字，字节判定配 rune 切片会 panic 或切出乱码）——字节口径只用于文件大小（`data.TrimFileTail`）；`schedule` 只依赖标准库，包内自持同语义实现
 - **富文本出站由通道声明**：通道决定出站形态与语法子集（QQ `channels.qq.markdown` 默认开，只在正文含 markdown 语法特征时走 `msg_type=2`），降级（表格→要点行、围栏→缩进、本地图片→文字）与被平台拒收后的纯文本回退都在 `channel/qq` 内；长文本切分经可选能力 `channel.Splitter` 由通道接管（markdown 感知 + 补闭合围栏），Manager 不感知平台语法
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
 - 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
@@ -38,7 +39,7 @@
 - **会话映射持久化在 `state.json`**（原子写，损坏即报错拒绝启动，不静默重建）；实例池懒建、同键串行、跨键并发上限、按 LRU/闲置回收
 - **单实例锁**：`<data_dir>/ivan.lock` 用 flock（释放不解锁文件，避免 unlink 竞争）；daemon 停机后清理 socket 文件
 - **出站无目标不算失败**：`channel.ErrUnroutable`（如 `--no-wait` 的 cli 请求）只记 `unmatched`，不重试；失败才重试一次并记 `failed`+`last_error`
-- **cli 通道不切分长消息**（`MaxLen()==0`），切分只对声明上限的通道（默认 1200 字符）生效
+- **cli 通道不切分长消息**（`MaxLen()==0`），切分只对声明上限的通道（默认 2048 字符）生效
 - **`ivan run` 不走总线**：前台直接流式打到 stdout（`Options.Stream`），不起 daemon；`Bus==nil` 时跳过出站投递
 - 配置借用：ivan 的 `api_key` 为空时从 `~/.config/tanya/config.yaml`（可经 `IVAN_TANYA_CONFIG` 指定）借用 `base_url`/`api_key`/`model`；`IVAN_*` 显式设置优先
 - 代码不添加注释，除非用户明确要求

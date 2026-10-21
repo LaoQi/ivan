@@ -118,7 +118,7 @@ socket 协议：**JSON Lines**，一行一帧（单帧上限 1 MiB），字段 `
 
 ## 6 长消息与出站规则
 
-- 出站前统一：去控制字符、按通道上限切分（每通道声明 `MaxLen`，默认 1200 字符，QQ 实施时按官方上限核对）。
+- 出站前统一：去控制字符、按通道上限切分（每通道声明 `MaxLen`，默认 **2048 字符**，QQ 实施时按官方上限核对）。
 - **富文本能力由通道声明，不在 Manager 里硬编码**：通道自行决定出站形态（QQ 的 `msg_type=2` markdown，见 `docs/qq-bot.md` §11.2）；Manager 只做路由与计数，不感知平台的消息类型与语法支持范围。支持的语法子集、降级形态（表格/围栏/本地图片）、被平台拒收后的回退，全部属于通道内部实现。
 - 切分按语义边界（段落 > 行 > 句 > 硬切），并保证不把代码块切得七零八落。通道可声明可选能力 `Splitter`（`SplitOutbound(text) []string`）接管切分——如 markdown 感知切分（不在围栏内断开、断开处补闭合围栏）；未声明时走通用切分器 `Split`。
 - 被动回复窗口：QQ 平台限制（同一 `msg_id` 限次数与时限）由 `channel/qq` 自己管 `msg_seq` 与回退到主动消息；Manager 不感知平台细节。
@@ -146,7 +146,7 @@ socket 协议：**JSON Lines**，一行一帧（单帧上限 1 MiB），字段 `
 长回合（多轮工具调用）会让用户长时间只看到静默，"服务无响应"与"正在跑"不可区分。为此引入**更新型出站**：一条逻辑消息可以被多次原位更新。
 
 - 消息模型（`bus`）：`OutboundMessage.Stream`（逻辑消息 id，空 = 普通消息）、`Final`（是否定稿）、`Kind = bus.KindTyping`（临时状态，不产生消息）；`Stream` 非空即走流式路由。
-- 通道可选能力（`channel`）：`StreamOpener{ StreamOpen(ctx, msg) (StreamHandle, error) }`（`StreamHandle.Update(ctx, text, done)`）与 `Typist{ Typing(ctx, msg) error }`；`StreamLimit{ StreamMaxLen() int }` 限定单条消息内展示的正文长度（默认 1200）。
+- 通道可选能力（`channel`）：`StreamOpener{ StreamOpen(ctx, msg) (StreamHandle, error) }`（`StreamHandle.Update(ctx, text, done)`）与 `Typist{ Typing(ctx, msg) error }`；`StreamLimit{ StreamMaxLen() int }` 限定单条消息内展示的正文长度（默认 2048）。
 - `Manager` 职责：按 `(channel, stream_id)` 归并并发分片（同 id 只开一次流）、节流外的合并、溢出收尾与余下内容补发、失败退化（开流失败或通道不支持 → 终局文本按普通消息投递）。**不支持流式的通道不需要任何改动**：中间态静默丢弃、终局照常。
 - 与默认语义的关系：`Sent/Failed` 计数只统计普通消息；流式另有 `StreamSent/StreamUpd/StreamSkip/StreamFail/StreamFinal/Typing/TypingFail`，`ivan status` 里 `stream=`/`upd=`/`final=` 可见。
 - 不变式：中间态**不额外请求模型、不计预算**；失败只计数不重试；终局消息的 `Kind`（reply/error）沿用回合结果，不被流式改写。
@@ -175,7 +175,7 @@ func (b *Bus) Stats() Counters                  // 计数 + 队列深度 + 最�
 
 - `Channel` 接口 = `Name/Start/Stop/Send`；可选 `Limiter{MaxLen()}`。
 - `Manager`：注册（重名报错）→ 顺序 `Start`（失败回滚已启动者）→ `Consume`（唯一出站消费者，出站流关闭或 ctx 结束即返回）→ 逆序 `Stop`。
-- 出站处理：`Sanitize`（去控制字符）→ `Split`（段落 > 行 > 句 > 硬切，上限取通道 `MaxLen`，默认 1200；`<=0` 不切分）→ 发送失败**重试 1 次**（默认 200ms 间隔）。
+- 出站处理：`Sanitize`（去控制字符）→ `Split`（段落 > 行 > 句 > 硬切，上限取通道 `MaxLen`，默认 2048；`<=0` 不切分）→ 发送失败**重试 1 次**（默认 200ms 间隔）。
 - 计数：`sent` / `failed`（含 `last_error`）/ `unmatched`（`ErrUnroutable`：无目标，不重试）。`Status()` 供 `ivan status` 渲染。
 
 ### 10.3 daemon 停机顺序

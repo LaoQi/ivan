@@ -392,9 +392,11 @@ func wsToken(token string) string {
 	return wsTokenPrefix + token
 }
 
+// shortID 按字符（rune）截断标识用于日志，避免多字节字符被切出乱码。
 func shortID(id string) string {
-	if len(id) <= 8 {
+	r := []rune(id)
+	if len(r) <= 8 {
 		return id
 	}
-	return id[:8]
+	return string(r[:8])
 }

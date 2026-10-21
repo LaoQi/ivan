@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -37,7 +38,7 @@ const (
 	DefaultHandoffForceTokens = 256000
 	DefaultStreamFirstSeconds = 3
 	DefaultStreamEverySeconds = 1
-	DefaultStreamMaxChars     = 1200
+	DefaultStreamMaxChars     = 2048
 )
 
 type RunnerConfig struct {
@@ -153,7 +154,7 @@ func Default() *Config {
 		Channels: ChannelsConfig{
 			CLI: CLIConfig{Enabled: true, Stream: true},
 			QQ: QQConfig{
-				MaxMessageLen: 1200, Markdown: true, Stream: true, StreamMaxLen: 1200, Typing: true,
+				MaxMessageLen: 2048, Markdown: true, Stream: true, StreamMaxLen: 2048, Typing: true,
 				ReconnectMaxSec: 60,
 			},
 		},
@@ -272,13 +273,13 @@ func (c *Config) normalize() {
 		c.Runner.StreamMaxChars = DefaultStreamMaxChars
 	}
 	if c.Channels.QQ.MaxMessageLen <= 0 {
-		c.Channels.QQ.MaxMessageLen = 1200
+		c.Channels.QQ.MaxMessageLen = 2048
 	}
 	if c.Channels.QQ.ReconnectMaxSec <= 0 {
 		c.Channels.QQ.ReconnectMaxSec = 60
 	}
 	if c.Channels.QQ.StreamMaxLen <= 0 {
-		c.Channels.QQ.StreamMaxLen = 1200
+		c.Channels.QQ.StreamMaxLen = 2048
 	}
 	if strings.TrimSpace(c.Schedule.JobsDB) == "" {
 		c.Schedule.JobsDB = DefaultJobsDB
@@ -388,9 +389,9 @@ func taskSlug(id string) string {
 	if s == "" {
 		return "task"
 	}
-	if len(s) > 64 {
+	if utf8.RuneCountInString(s) > 64 {
 		sum := sha256.Sum256([]byte(id))
-		s = s[:64] + "-" + hex.EncodeToString(sum[:6])
+		s = string([]rune(s)[:64]) + "-" + hex.EncodeToString(sum[:6])
 	}
 	return s
 }
