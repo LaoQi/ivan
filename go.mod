@@ -3,7 +3,7 @@ module github.com/LaoQi/ivan
 go 1.26.0
 
 require (
-	github.com/LaoQi/battlelab v0.0.0
+	github.com/LaoQi/battlelab v0.1.0
 	github.com/gorilla/websocket v1.5.3
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.60.1
@@ -20,5 +20,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
-
-replace github.com/LaoQi/battlelab => ../battlelab
