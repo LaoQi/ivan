@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LaoQi/tanya/agent"
+	"github.com/LaoQi/battlelab/agent"
 
 	"github.com/LaoQi/ivan/bus"
 	chlog "github.com/LaoQi/ivan/channel/log"

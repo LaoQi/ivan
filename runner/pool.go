@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LaoQi/tanya/agent"
-	"github.com/LaoQi/tanya/tools"
+	"github.com/LaoQi/battlelab/agent"
+	"github.com/LaoQi/battlelab/tools"
 
 	"github.com/LaoQi/ivan/bus"
 	"github.com/LaoQi/ivan/data"

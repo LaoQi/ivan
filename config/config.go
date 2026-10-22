@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/LaoQi/tanya/agent"
+	"github.com/LaoQi/battlelab/agent"
 )
 
 var Version = "dev"

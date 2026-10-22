@@ -8,19 +8,19 @@
 ## 设计约束
 
 - 定位只做三件事：通道、调度、会话；不做 Web UI、多渠道全家桶、语音/视频、skills/MCP、多租户
-- 复用 tanya：以库方式依赖 `agent` 与 `tools`（本地 `../tanya`，`go.work` 联调）；**不复用** `repl`/`readline`/终端所有权（常驻无 TTY 场景）。需要的能力缺口在 tanya 侧小步补齐，两仓库 CHANGELOG 同步
+- 复用核心库 `github.com/LaoQi/battlelab`（`agent`/`tools`/`ctty`，本地 `../battlelab`，`go.work` 联调；2026-10-22 从 tanya 抽出）；**不复用** tanya 的 `repl`/`readline`/`views` 与任何终端所有权（常驻无 TTY 场景）。库侧能力缺口在 battlelab 小步补齐，两仓 CHANGELOG 同步
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
-- **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 tanya（`bus`+`channel` 抽库时成对抽出）
+- **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 battlelab/tanya（`bus`+`channel` 抽库时成对抽出）
 - **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
 - **文本长度一律按字符（rune）计**：`bus.RuneLen/Clip/Truncate/OneLine` 是唯一口径（`clip`/`options`/`brief`/`oneLine`/`quote`/`shortID`/`KeySlug`/`taskSlug` 一律按字符截断）；**不得用 `len(s)` 判定文本长度、不得用 `s[:n]` 切文本**（中文 3 字节/字，字节判定配 rune 切片会 panic 或切出乱码）——字节口径只用于文件大小（`data.TrimFileTail`）；`schedule` 只依赖标准库，包内自持同语义实现
 - **富文本出站由通道声明**：通道决定出站形态与语法子集（QQ `channels.qq.markdown` 默认开，只在正文含 markdown 语法特征时走 `msg_type=2`），降级（表格→要点行、围栏→缩进、本地图片→文字）与被平台拒收后的纯文本回退都在 `channel/qq` 内；长文本切分经可选能力 `channel.Splitter` 由通道接管（markdown 感知 + 补闭合围栏），Manager 不感知平台语法
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
 - 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
-- `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 tanya（抽库对象）
-- 事件 sink 不得阻塞：tanya 的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
+- `qqbot/` 只依赖标准库 + `gorilla/websocket`，不得依赖 ivan 其他包或 battlelab/tanya（抽库对象）
+- 事件 sink 不得阻塞：库侧（battlelab `agent`）的事件是同步串行投递，落盘/出站一律走带缓冲 channel + 独立 goroutine
 - **中间态投递（更新型出站）**：长回合的"还在跑"反馈实现为**同一条消息的原位更新**（`bus.OutboundMessage.Stream`/`Final`，`channel.StreamOpener`/`Typist` 可选能力），**不做逐里程碑进度消息**；正文就绪前用 `KindTyping`（QQ `msg_type=6`、cli typing 帧）覆盖静默期，正文就绪后流式跟进，超出 `runner.stream_max_chars` 收尾并补发余下内容；不支持流式的通道自动退化（中间态丢弃、终局照常），中间态不计预算、失败只计数不重试
 - 缓存不变性：动态内容（记忆、目标、状态、作业结果）经 user 消息注入，不改 system prompt 快照
-- **全局说明与实际隔离**：system prompt 的"全局说明"段只读 ivan 自己的 `~/.config/ivan/AGENTS.md`（配置项 `global_agents`，`off` 禁用），**不读 tanya 的 `~/.config/tanya/AGENTS.md`**（经 tanya `agent.WithGlobalAgentsPath` 注入；机制保留、位置隔离）
+- **全局说明与实际隔离**：system prompt 的"全局说明"段只读 ivan 自己的 `~/.config/ivan/AGENTS.md`（配置项 `global_agents`，`off` 禁用），**不读 tanya 的 `~/.config/tanya/AGENTS.md`**（经 battlelab `agent.WithGlobalAgentsPath` 注入；机制保留、位置隔离）
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；AppSecret 不进日志/事件/错误信息。**危险命令黑名单与审批档属 P5 保留计划，当前未实施**（缓解只有限定工作区 + 预算 + 暂停 + 事件审计）
 - 崩溃回合：`DispatchTurn` 期间在 `state.json` 留 `running` 标记，启动时 `DrainRunning` 清残留、记 `turn_interrupted`、并在该会话下一次回合注入"上次回合被中断、先核对实际状态"的提示（只注入一次）
 - 记忆裁剪：`runner.memory_max_bytes`（默认 0=不裁剪），回合结束后按行边界保留尾部 + 头部裁剪标记（`data.TrimFileTail`）
@@ -32,9 +32,9 @@
 - 任务提示词落文件：`add` 时写 `<data_dir>/tasks/<job_id>.md`（0600 原子写）并由 `payload.file` 引用，触发**优先读文件**、不可读则回退 `payload.prompt` 并记 `job_task_file`；`update` 同步重写、`remove` 删自有文件
 - 定时作业：触发由 runner **同步**执行（`Runner.TriggerJob`），作业状态以真实回合结果为准；出站按 `InboundMessage.ReplyChannel` **直投**（不走 Bus）以便拿到投递错误；作业目标会话只由 runner 注入，模型不可指定；配额默认不限
 - 持久化一律原子写（临时文件 + fsync + rename）；解析失败保留原文件并显式报错，**不静默重建**
-- 启动拒绝 root（复用 `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致
+- 启动拒绝 root（复用 battlelab `ctty.IsRoot()`），逃生舱口径与 tanya 保持一致
 - 部署纪律：部署态只做只读探测；功能验证在本地或临时环境完成。生产部署的具体形态（主机、路径、单元、作业）属于部署方环境，**不写进本仓库**；生产上的写操作允许直接执行，但要有明确目的、做完收拾干净
-- **会话目录按会话键隔离**：每个 `SessionKey` 一个工作区目录 `<data_dir>/agents/<key-slug>/`（tanya 会话 id 为秒级时间戳，多实例共享工作区会互相覆盖，见 `docs/reuse-probe.md` R11）
+- **会话目录按会话键隔离**：每个 `SessionKey` 一个工作区目录 `<data_dir>/agents/<key-slug>/`（库侧会话 id 为秒级时间戳，多实例共享工作区会互相覆盖，见 `docs/reuse-probe.md` R11）
 - **`tools.Options.Workspace` 必须是动态闭包**指向 `agent.Workspace()`，不得用静态 `os.Getwd()` 值（`SwitchWorkspace` 不会自动同步，见 R7）
 - **会话映射持久化在 `state.json`**（原子写，损坏即报错拒绝启动，不静默重建）；实例池懒建、同键串行、跨键并发上限、按 LRU/闲置回收
 - **单实例锁**：`<data_dir>/ivan.lock` 用 flock（释放不解锁文件，避免 unlink 竞争）；daemon 停机后清理 socket 文件
@@ -49,7 +49,7 @@
 ```
 main.go               CLI：run / daemon / send / status / config / version；--session 指定会话键 [已实现]
 commands.go           子命令实现：flag 解析、状态渲染、磁盘回退、信号上下文 [已实现]
-config/               ivan 配置（内嵌 agent.Config + runner/daemon/channels 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
+config/               ivan 配置（内嵌 battlelab agent.Config + runner/daemon/channels 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
 bus/                  消息模型 + Bus（两条缓冲流、非阻塞投递、丢弃计数、关闭语义）+ 会话键归一/KeySlug [已实现，零依赖]
 channel/              Channel 接口 + Manager（路由、清理、切分、重试、状态）+ 可选能力（Limiter/StreamOpener/Typist/StreamLimit/Splitter）+ ErrUnroutable [已实现]
 channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping/chunk/typing）+ 客户端（ivan send/status 用，TTY 下显示增量）[已实现]
@@ -69,7 +69,7 @@ schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_ver
 ## 文档
 
 - `docs/plan.md` 总纲：定位、架构、抽库判据、阶段路线、决策记录 D1–D7、风险红线
-- `docs/reuse-tanya.md` 复用清单、P0 探针 R1–R8、需 tanya 配合的改动 T1–T3
+- `docs/reuse-core.md` 复用清单、P0 探针 R1–R8、需库侧配合的改动 T1–T3
 - `docs/channels.md` 通道抽象、Bus 与消息模型、会话键、cli/log 通道、切分与入站安全
 - `docs/qq-bot.md` QQ 官方机器人协议设计、分层与抽库路径、测试策略、待核对清单
 - `docs/schedule.md` 作业模型、调度循环、`schedule` 工具、结果回灌、验收
@@ -95,4 +95,4 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "说点长的"       # TTY 下原地
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 
-依赖：`github.com/LaoQi/tanya` 经 `go.work`（`use ./ ../tanya`）与 `go.mod` 的 `replace ../tanya` 本地联调；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。
+依赖：`github.com/LaoQi/battlelab` 经 `go.work`（`use ./ ../battlelab`）与 `go.mod` 的 `replace ../battlelab` 本地联调（**已不直接依赖 tanya**，仅运行期借用其配置文件）；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。

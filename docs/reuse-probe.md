@@ -1,6 +1,6 @@
 # P0 复用探针结论（2026-10-10）
 
-> 目的：在写业务代码前验证"ivan 复用 tanya `agent` + `tools`"的关键假设。结论已回灌 `AGENTS.md`、`docs/sessions.md`、`docs/reuse-tanya.md`。
+> 目的：在写业务代码前验证"ivan 复用 tanya `agent` + `tools`"的关键假设。结论已回灌 `AGENTS.md`、`docs/sessions.md`、`docs/reuse-core.md`。
 > 代码：`probe/probe_test.go`（R1–R11）、`internal/fakellm`（本地假 LLM 服务，SSE）。
 
 ## 1 方法

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LaoQi/tanya/agent"
+	"github.com/LaoQi/battlelab/agent"
 )
 
 type record struct {

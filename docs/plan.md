@@ -26,12 +26,12 @@ ivan 是常驻的极简 agent：**特化在定时触发与计划任务**，全�
 - 插件市场、skills、MCP
 - 多用户多租户、权限体系、云端部署
 
-## 3 与 tanya 的关系
+## 3 与核心库、tanya 的关系
 
-- 共用 tanya 的 `agent`（LLM 双协议、回合循环、工具注册、会话存储、交接、统计）与 `tools`（`run_shell`/`read_image`/内建）。
-- 开发期用 `go.work` 把 `../tanya` 与 `../ivan` 放进同一 workspace；发布按 tag。
-- **不复用** `repl`/`readline`/`ctty` 的终端所有权（常驻无 TTY 且独占终端语义会反向绑架架构）；仅按需复用 `ctty` 的零依赖原语（信号/`IsRoot`/UTF-8）与 `render/markdown`。
-- 复用清单、探针与需 tanya 侧配合的改动：`docs/reuse-tanya.md`。
+- 共用核心库 `github.com/LaoQi/battlelab` 的 `agent`（LLM 双协议、回合循环、工具注册、会话存储、交接、统计）、`tools`（`run_shell`/`read_image`/内建）与 `ctty`（零依赖终端原语：信号/`IsRoot`/UTF-8）。三包 2026-10-22 从 tanya 抽出，**ivan 已不直接依赖 tanya**（仅运行期借用其配置文件里的凭证）。
+- 开发期用 `go.work` 把 `../battlelab` 与 `../ivan` 放进同一 workspace；发布按 tag。
+- **不复用** tanya 的 `repl`/`readline`/`views` 与任何终端所有权（常驻无 TTY 且独占终端语义会反向绑架架构）；`render/markdown` 按需、仍在 tanya 仓。
+- 复用清单、探针与需库侧配合的改动：`docs/reuse-core.md`。
 - **后续抽库**：产生第二个复用者（如 QQ 协议、通道抽象、调度器）后，把公共模块抽成独立 module 再引入；抽库边界与判据见 §5 与 `docs/qq-bot.md` §8。
 
 ## 4 总体架构
@@ -54,18 +54,18 @@ Core 层       tanya 的 agent（LLM/回合/工具/会话/交接）+ ivan 特化
 
 ```
 main.go            CLI：run(前台单发) / send / daemon / status / jobs / logs / config / version
-config/            内嵌 agent.Config + channels + schedule + daemon + policy 段（yaml + IVAN_*）
+config/            内嵌 battlelab agent.Config + channels + schedule + daemon + policy 段（yaml + IVAN_*）
 bus/               InboundMessage / OutboundMessage / Bus（带缓冲、非阻塞、可观测丢弃计数）
 channel/           Channel 接口 + Manager + 注册表；子包 cli/ log/ qq/
 schedule/          Job 模型 / 存储抽象 + 进程内实现 / 调度循环（at|every|daily）
-runner/            会话键 → *agent.Agent 池、回合驱动、事件 → bus、交接自动续跑
+runner/            会话键 → *agent.Agent 池（battlelab）、回合驱动、事件 → bus、交接自动续跑
 data/              作业/事件/状态/会话索引的原子落盘（jsonl + flock 单实例锁）
 prompt/            system 提示词基座 + 环境段（动态内容走 user 消息，保 prompt cache 不变性）；全局说明读 ivan 自己的 ~/.config/ivan/AGENTS.md，与 tanya 隔离
 qqbot/             QQ 开放平台协议实现（token / gateway / websocket / 开放 API / 事件类型）
 schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite 驱动的包）
 ```
 
-**抽库候选**（隔离规则：这些包只依赖标准库与自身类型，不得依赖 ivan 其他包与 tanya）
+**抽库候选**（隔离规则：这些包只依赖标准库与自身类型，不得依赖 ivan 其他包与 battlelab/tanya）
 
 | 候选 | 依赖纪律 | 抽库计划 |
 |---|---|---|
@@ -120,11 +120,11 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | D3 | QQ 协议实现 | **自实现**，不使用 `tencent-connect/botgo`（长期未更新、实现质量差）；先落在 ivan 内 `qqbot/`，稳定后抽成独立 module 引入 |
 | D4 | 首期消息形态 | 仅文本 + 图片 |
 | D5 | 定时表达式 | **修订（2026-10-21）**：`at`/`every`/`daily`（每天固定时刻 + 时区）已做，`daily` 覆盖"每日定时汇报/提醒"的实际需求；**完整 cron 表达式不做**（`expr` 字段保留但 `Validate` 报错），将来要"每周/每月"时按需扩展 `daily` 的周期维度，不引通用解析器 |
-| D6 | 与 tanya 关系 | 共用 agent 核心，两仓库同步推进；公共模块后续按 §5 判据抽库 |
+| D6 | 与核心库关系 | 共用 `battlelab` 的 `agent`/`tools`/`ctty`（2026-10-22 从 tanya 抽出），库改动与调用方 CHANGELOG 同步；公共模块后续按 §5 判据抽库 |
 | D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；webhook、心跳为后置可选 |
 | D8 | 作业存储 | **存储抽象接口 + sqlite 实现**（`modernc.org/sqlite`，纯 Go 无 cgo）：文件级重写不够可靠，作业状态需要事务与并发安全；接口保持窄（List/Get/Put/Delete/Close），换实现不动调度器 |
 | D9 | 预算与暂停口径 | 预算**只在 runner 一处**统计（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日量落 `state.json`），调度器通过 `Budget` 回调复用，不再自带计数器；`paused` 只挡无人值守路径（定时触发、自动续跑、阈值交接提示），用户消息照常处理 |
-| D10 | 全局说明（AGENTS.md） | **机制保留、位置隔离**：tanya 的 `agent` 会在 system prompt 末尾拼"全局说明 + 项目说明"，默认读 `~/.config/tanya/AGENTS.md`；ivan 经 `agent.WithGlobalAgentsPath` 改读自己的 `~/.config/ivan/AGENTS.md`（`global_agents` 可改路径，`off` 禁用），避免 tanya 的偏好串入无人值守代理；项目说明仍读会话工作区下的 `AGENTS.md` |
+| D10 | 全局说明（AGENTS.md） | **机制保留、位置隔离**：库侧 `agent` 在 system prompt 末尾拼"全局说明 + 项目说明"，**默认不读任何全局文件**；ivan 经 `agent.WithGlobalAgentsPath` 读自己的 `~/.config/ivan/AGENTS.md`（`global_agents` 可改路径，`off` 禁用），避免 tanya 的偏好串入无人值守代理；项目说明仍读会话工作区下的 `AGENTS.md` |
 
 ## 10 风险与红线
 
@@ -138,7 +138,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 ## 11 文档索引
 
 - `docs/plan.md`（本文件）总纲与路线
-- `docs/reuse-tanya.md` 复用清单、P0 探针与需 tanya 配合的改动
+- `docs/reuse-core.md` 复用清单、P0 探针与需 tanya 配合的改动
 - `docs/channels.md` 通道抽象、Bus 与消息模型、cli 通道
 - `docs/qq-bot.md` QQ 官方机器人协议设计、实现分层与抽库路径
 - `docs/schedule.md` 定时与计划任务设计与 P3 实现记录（§8）

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LaoQi/tanya/ctty"
+	"github.com/LaoQi/battlelab/ctty"
 
 	"github.com/LaoQi/ivan/bus"
 	"github.com/LaoQi/ivan/channel/cli"

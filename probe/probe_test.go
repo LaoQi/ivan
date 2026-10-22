@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LaoQi/tanya/agent"
-	"github.com/LaoQi/tanya/tools"
+	"github.com/LaoQi/battlelab/agent"
+	"github.com/LaoQi/battlelab/tools"
 
 	"github.com/LaoQi/ivan/data"
 	"github.com/LaoQi/ivan/internal/fakellm"

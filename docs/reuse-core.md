@@ -1,19 +1,19 @@
-# 复用 tanya：清单、探针与配合改动
+# 复用核心库：清单、探针与配合改动
 
-> 状态：规划。tanya 侧现状以 `../tanya/AGENTS.md` 为准；本文只记 ivan 的复用口径。
+> 状态：现行。**2026-10-22 起 `agent`/`tools`/`ctty` 已抽到 `github.com/LaoQi/battlelab`**（原 `reuse-tanya.md`），本文的包路径按 battlelab 读；ivan 已不再直接依赖 tanya（`config` 借用只借运行期的配置文件路径）。库侧现状以 `../battlelab/AGENTS.md` 为准。
+> 命令通知（`CommandNotifier`）**没有进库**（库不提供具体通知实现），需要时由 ivan 自实现或从 tanya 的 `notify` 包移植。
 
 ## 1 复用矩阵
 
-| tanya 包 | ivan 用途 | 依赖纪律 |
+| battlelab 包 | ivan 用途 | 依赖纪律 |
 |---|---|---|
 | `agent` | LLM 双协议、回合循环、工具注册、会话存储、交接、统计、图像 | ivan 核心直接依赖 |
 | `tools`（含 `shell`/`image`/`builtin`） | 标准工具集 `run_shell`/`read_image`/内建 | 经 `tools.Standard` 装配 |
-| `tools/shell` 的 `CommandNotifier` | 出站通知（`notify_cmd` 模板） | 后置，按需 |
 | `ctty` | 零依赖原语：`IsRoot`（拒绝 root）、`EnsureUTF8`、信号面 | 只取原语，不用终端所有权 |
-| `render/markdown` | 出站消息的 markdown → 纯文本/ANSI 渲染 | 后置，按需 |
-| `config` | 参考其加载与校验口径 | **不直接复用**（见 §3） |
+| tanya 的 `render/markdown` | 出站消息的 markdown → 纯文本/ANSI 渲染 | 后置，按需（仍在 tanya 仓） |
+| tanya 的 `config` | 参考其加载与校验口径 | **不直接复用**（见 §3） |
 
-**明确不复用**：`repl`、`readline`、`ctty` 的 `Console`/`Lease`（终端唯一持有者与借出语义）。理由：ivan 常驻且多数时候无 TTY，独占终端的所有权设计会反向绑架架构；终端交互体验不在本期目标内。
+**明确不复用**：tanya 的 `repl`、`readline`、`views/shell`，以及 battlelab `ctty` 之外任何终端所有权设计（`Console`/`Lease` 在 tanya 的 `readline` 里）。理由：ivan 常驻且多数时候无 TTY，独占终端的所有权设计会反向绑架架构；终端交互体验不在本期目标内。
 
 ## 2 复用到的具体 API
 
@@ -30,15 +30,15 @@
 
 `Console: nil` 时 `tools/shell` 落 `nullConsole`：`LendStdin` 给空租约，`LendFull` 返回 `ErrNoLend`。即 `interactive: true` 的命令在 ivan 中**明确报错而非挂死**，这是无人值守下需要的语义。
 
-## 3 需 tanya 侧配合的改动
+## 3 需库侧配合的改动
 
-按"能不改就不改、要改就小步"处理；每条改动同时更新 tanya 的 `CHANGELOG.md`。
+按"能不改就不改、要改就小步"处理；每条改动同时更新对应仓库的 `CHANGELOG.md`（库改动记 battlelab，前台改动记 tanya）。
 
 | # | 改动 | 理由 | 影响面 |
 |---|---|---|---|
 | T1 | ~~`agent.UserAgentProduct` 常量改为可注入~~ | **已关闭（不需要）**：`agent.Config.UserAgent` 本就是配置项且透传到 LLM 请求头，ivan 侧填 `config.UserAgent(version)`（`ivan/<ver> (+repo)`），QQ 侧另有 `qqbot.Config.UserAgent` | 无 |
 | T2 | ~~`config.Load` 泛化：路径与 env 前缀参数化~~ | **已关闭（不需要）**：P0 起 ivan 自实现 `config/`（yaml + `IVAN_*` + 借用 tanya 凭证），不复用 tanya 的 config 包 | 无 |
-| T4 | `newPromptBuilder` 的全局说明路径可注入（`agent.WithGlobalAgentsPath`，空串=禁用，标题按实际路径显示） | ivan 需要读自己的 `~/.config/ivan/AGENTS.md`，不能混用 tanya 的全局说明 | `agent`，小（**已实施**） |
+| T4 | `newPromptBuilder` 的全局说明路径可注入（`agent.WithGlobalAgentsPath`，空串=禁用，标题按实际路径显示） | ivan 需要读自己的 `~/.config/ivan/AGENTS.md`，不能混用 tanya 的全局说明 | `agent`，小（**已实施**；抽库后库侧默认即"不读"，ivan 继续显式注入） |
 | T3 | ~~会话按 session key 归置~~ | **P0 结论：不改 tanya**——用"每个会话键一个独立工作区目录"实现隔离（探针 R11），`LoadSession`/`SessionFile` 足够 | 无 |
 
 T1/T2/T3 **均已关闭**（T1 由配置满足、T2 由 ivan 自实现替代、T3 由「每会话独立工作区」实现）；**T4 已实施**（tanya `agent.WithGlobalAgentsPath` + ivan `config.global_agents`，见 `docs/plan.md` D10）。当前**无待 tanya 配合的改动**，新增项须先在此登记。

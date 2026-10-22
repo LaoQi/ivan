@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/LaoQi/tanya/ctty"
+	"github.com/LaoQi/battlelab/ctty"
 
 	"github.com/LaoQi/ivan/config"
 )
