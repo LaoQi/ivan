@@ -1,5 +1,5 @@
-github.com/LaoQi/battlelab v0.1.0 h1:wiWaM/XrAdpPDFSKuu9l0IU629BxqNOOeZMlagT5MZc=
-github.com/LaoQi/battlelab v0.1.0/go.mod h1:3wsvotIy4uFotJi51SuaYS96KBd6Bt4ar5aYmRq85dk=
+github.com/LaoQi/battlelab v0.1.1 h1:Rk7p0I/vHrJbSgF3YQ+mOpN+AZCBakMzuiOacC5zkSg=
+github.com/LaoQi/battlelab v0.1.1/go.mod h1:3wsvotIy4uFotJi51SuaYS96KBd6Bt4ar5aYmRq85dk=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 h1:LMLX+LgTNWpfvCBdFebv6EsYotImrt/Ppc5cXIriCSo=

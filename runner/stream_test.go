@@ -208,6 +208,7 @@ func TestStreamFinalKeepsErrorKind(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Status: 500})
 	defer srv.Close()
 	cfg := streamConfig(t, srv.BaseURL())
+	cfg.MaxRetries = 0
 	r, err := New(Options{Cfg: cfg, Human: chlog.New(io.Discard)})
 	if err != nil {
 		t.Fatalf("New: %v", err)

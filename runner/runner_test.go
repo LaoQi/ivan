@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,7 +42,16 @@ type rig struct {
 
 func newRig(t *testing.T, srv *fakellm.Server) *rig {
 	t.Helper()
+	return newRigTweak(t, srv, nil)
+}
+
+// newRigTweak 在装配前调整配置（用于关闭重试等需要固定上游行为的用例）。
+func newRigTweak(t *testing.T, srv *fakellm.Server, tweak func(*config.Config)) *rig {
+	t.Helper()
 	cfg := testConfig(t, srv)
+	if tweak != nil {
+		tweak(cfg)
+	}
 	log, err := data.NewEventLog(cfg.EventsDir(), 64)
 	if err != nil {
 		t.Fatalf("NewEventLog: %v", err)
@@ -221,7 +231,7 @@ func TestResumeAfterRestart(t *testing.T) {
 func TestErrorTurnPublishesErrorKind(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Status: 500})
 	defer srv.Close()
-	rg := newRig(t, srv)
+	rg := newRigTweak(t, srv, func(c *config.Config) { c.MaxRetries = 0 })
 	err := rg.r.Dispatch(context.Background(), inbound("cli:default", "r1", "会失败"))
 	if err == nil {
 		t.Fatal("失败回合应返回错误")
@@ -410,5 +420,42 @@ func TestDispatchAcceptsMediaOnlyMessage(t *testing.T) {
 	}
 	if !strings.Contains(string(reqs[0].Messages[len(reqs[0].Messages)-1]), "/tmp/a.jpg") {
 		t.Fatalf("模型应看到附件路径，实际: %s", reqs[0].Messages[len(reqs[0].Messages)-1])
+	}
+}
+
+func TestRetryOnTransientUpstreamError(t *testing.T) {
+	srv := fakellm.New(
+		fakellm.Step{Status: 500},
+		fakellm.Step{Status: 500},
+		fakellm.Step{Content: "重试后的回答"},
+	)
+	defer srv.Close()
+	rg := newRig(t, srv)
+	if err := rg.r.Dispatch(context.Background(), inbound("cli:default", "r1", "问一句")); err != nil {
+		t.Fatalf("重试后应成功: %v", err)
+	}
+	if n := srv.Calls(); n != 3 {
+		t.Fatalf("默认 2 次重试应共 3 次请求: %d", n)
+	}
+	out := <-rg.bus.Outbound()
+	if !strings.Contains(out.Content, "重试后的回答") {
+		t.Fatalf("回复异常: %q", out.Content)
+	}
+	if rg.r.Status().Failures != 0 {
+		t.Fatalf("成功回合不应计失败: %+v", rg.r.Status())
+	}
+	if err := rg.log.Close(); err != nil {
+		t.Fatalf("Close event log: %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(rg.cfg.EventsDir(), "*.jsonl"))
+	if len(matches) == 0 {
+		t.Fatal("找不到事件文件")
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("读事件文件: %v", err)
+	}
+	if !strings.Contains(string(raw), `"kind":"retry"`) || !strings.Contains(string(raw), `"attempt":2`) {
+		t.Fatalf("事件日志缺少 retry 条目或序号: %s", raw)
 	}
 }

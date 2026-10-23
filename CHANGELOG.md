@@ -2,6 +2,8 @@
 
 ivan 变更记录。新条目加在最上方的日期分节内（没有当天分节就新建一个）；本文件记变更，AGENTS.md 只保留现行约束。
 
+## 2026-10-23
+- feat(config,data,deps): **请求失败自动重试**（依赖 `battlelab v0.1.1`）——上游抖动（网络错误 / `408`·`425`·`429`·`5xx` / 尚未有输出时的流中断）不再直接让回合失败：库侧新增 `agent.Config.MaxRetries`，重试包在 `Client.ChatStream` 外层（chat/responses 共用、每次尝试 = 一次完整请求）；**已输出内容后失败不再重试**（已上屏内容无法回滚），语义失败（`response.failed` 等）与其余 4xx 不重试；退避 0.5s 起指数翻倍、封顶 8s，上游给 `Retry-After` 时优先（封顶 60s），等待可被 `ctx` 取消。**ivan 侧**：`max_retries`（默认 2、`IVAN_MAX_RETRIES` 覆盖、`0` = 关闭、上限 20 越界回落默认，`config.example.yaml` 同步）；`data.EventLog` 新增 `retry` 事件（`attempt`/`max_retries`/`delay_ms`，错误原文完整进 `text`，无人值守排障可见）；预算口径不变（失败尝试没有 usage，不计 token），重试期间对通道静默。**测试**：`config.TestMaxRetriesDefaultAndEnv`（默认/yaml/env/越界回落）、新增 `data/events_test.go`（`retry` 映射与字段）、`runner.TestRetryOnTransientUpstreamError`（两次 500 后成功：3 次请求、回合成功、状态不计失败、事件日志有 `retry` 条目且 `attempt:2`，耗时含真实退避 1.5s）；另把两个「上游 500 → 回合失败」用例显式关掉重试（`newRigTweak` + `cfg.MaxRetries = 0`）——`fakellm` 步骤用尽后默认返回成功，开着重试会把「一次性 500」变成成功回合，掩盖原语义。**文档**：`config.example.yaml`、本文件、`AGENTS.md` 设计约束条。
 ## 2026-10-22
 - refactor(deps): **核心依赖改为 `github.com/LaoQi/battlelab`，不再直接依赖 tanya**——`agent`/`tools`/`ctty` 已从 tanya 抽成独立库（同日落地，边界见 battlelab `docs/extraction.md`）；ivan 侧只改 8 个文件的 import 路径，行为与配置零变化（`agent.Config` 新增 `LocalDir` 为 `yaml:"-"`，不出现于配置；全局说明仍由 ivan 显式注入）。`go.mod` 去掉 `github.com/LaoQi/tanya` require 与 replace、`go.work` 去掉 `../tanya`，改 `replace github.com/LaoQi/battlelab => ../battlelab`；`go mod tidy` 顺带把 `gorilla/websocket`、`modernc.org/sqlite` 从 indirect 提为直接依赖（此前分类有误）。`CommandNotifier` **不进库**（库不提供具体通知实现），需要时由 ivan 自实现或移植 tanya 的 `notify` 包。文档：`AGENTS.md` 依赖与结构、`docs/plan.md` §3/§5/D6/D10、`docs/reuse-tanya.md` → `docs/reuse-core.md`（包路径按 battlelab 读）。验收：`go build/vet ./...`、`go test ./...` 全绿（probe R1–R11 无变化）。
 

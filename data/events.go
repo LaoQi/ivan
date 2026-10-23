@@ -21,6 +21,9 @@ type record struct {
 	Failed       bool   `json:"failed,omitempty"`
 	Interrupted  bool   `json:"interrupted,omitempty"`
 	DurMS        int64  `json:"dur_ms,omitempty"`
+	Attempt      int    `json:"attempt,omitempty"`
+	MaxRetries   int    `json:"max_retries,omitempty"`
+	DelayMS      int64  `json:"delay_ms,omitempty"`
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
 	TotalTokens  int    `json:"total_tokens,omitempty"`
 	Context      int    `json:"context_tokens,omitempty"`
@@ -163,6 +166,11 @@ func toRecord(e agent.Event) record {
 			r.PromptTokens = e.Response.Usage.PromptTokens
 			r.TotalTokens = e.Response.Usage.TotalTokens
 		}
+	case agent.EventRetry:
+		r.Text = e.Retry.Err
+		r.Attempt = e.Retry.Attempt
+		r.MaxRetries = e.Retry.Max
+		r.DelayMS = e.Retry.Delay.Milliseconds()
 	case agent.EventTurnEnd:
 		r.DurMS = e.Turn.Duration.Milliseconds()
 		r.Failed = e.Turn.Failed
@@ -189,6 +197,8 @@ func kindName(k agent.EventKind) string {
 		return "response"
 	case agent.EventReasoningEnd:
 		return "reasoning_end"
+	case agent.EventRetry:
+		return "retry"
 	case agent.EventTurnEnd:
 		return "turn_end"
 	}

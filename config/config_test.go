@@ -233,3 +233,42 @@ func TestQQMarkdownFromYAML(t *testing.T) {
 		t.Fatal("配置中的 markdown: false 应生效")
 	}
 }
+
+func TestMaxRetriesDefaultAndEnv(t *testing.T) {
+	if got := Default().MaxRetries; got != DefaultMaxRetries {
+		t.Fatalf("默认重试次数应为 %d: %d", DefaultMaxRetries, got)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("base_url: http://127.0.0.1:1/v1\nmodel: m\nmax_retries: 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxRetries != 5 {
+		t.Fatalf("yaml max_retries 未生效: %d", cfg.MaxRetries)
+	}
+	t.Setenv("IVAN_MAX_RETRIES", "0")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if cfg.MaxRetries != 0 {
+		t.Fatalf("env 应覆盖 yaml（0 = 关闭）: %d", cfg.MaxRetries)
+	}
+	t.Setenv("IVAN_MAX_RETRIES", "")
+	for _, body := range []string{"max_retries: -1\n", "max_retries: 99\n"} {
+		if err := os.WriteFile(path, []byte("base_url: http://127.0.0.1:1/v1\nmodel: m\n"+body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err = Load(path)
+		if err != nil {
+			t.Fatalf("Load %q: %v", body, err)
+		}
+		if cfg.MaxRetries != DefaultMaxRetries {
+			t.Errorf("%q 应回落到默认 %d: %d", body, DefaultMaxRetries, cfg.MaxRetries)
+		}
+	}
+}

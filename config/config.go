@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,6 +20,8 @@ var Version = "dev"
 
 const (
 	DefaultSessionMode        = "global"
+	DefaultMaxRetries         = 2
+	maxRetriesLimit           = 20
 	DataDirSuffix             = ".local/share/ivan"
 	ConfigPathSuffix          = ".config/ivan/config.yaml"
 	TanyaConfigPathSuffix     = ".config/tanya/config.yaml"
@@ -126,6 +129,7 @@ func Default() *Config {
 			Model:            "deepseek-v4-flash",
 			Temperature:      0.7,
 			ApiProtocol:      "responses",
+			MaxRetries:       DefaultMaxRetries,
 			SessionMode:      DefaultSessionMode,
 			UserAgent:        UserAgent(Version),
 			DataDir:          filepath.Join(home, filepath.FromSlash(DataDirSuffix)),
@@ -221,6 +225,11 @@ func applyEnv(cfg *Config) {
 	set("REASONING_EFFORT", &cfg.ReasoningEffort)
 	set("SESSION_MODE", &cfg.SessionMode)
 	set("IMAGE_DETAIL", &cfg.ImageDetail)
+	if v := os.Getenv(EnvPrefix + "MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MaxRetries = n
+		}
+	}
 	set("SOCKET", &cfg.Daemon.Socket)
 	set("QQ_APP_ID", &cfg.Channels.QQ.AppID)
 	set("QQ_APP_SECRET", &cfg.Channels.QQ.AppSecret)
@@ -235,6 +244,9 @@ func (c *Config) normalize() {
 	c.GlobalAgents = expandHome(c.GlobalAgents)
 	if strings.TrimSpace(c.Daemon.Socket) == "" {
 		c.Daemon.Socket = DefaultSocket
+	}
+	if c.MaxRetries < 0 || c.MaxRetries > maxRetriesLimit {
+		c.MaxRetries = DefaultMaxRetries
 	}
 	if c.Daemon.BusBuffer <= 0 {
 		c.Daemon.BusBuffer = DefaultBusBuffer
