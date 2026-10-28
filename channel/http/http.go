@@ -20,9 +20,11 @@ import (
 
 const (
 	Name         = "http"
-	PathNotify  = "/notify"
-	PathRequest = "/request"
-	PathHealth  = "/healthz"
+	PathNotify   = "/notify"
+	PathRequest  = "/request"
+	PathHealth   = "/healthz"
+	PathManifest = "/.well-known/service.json"
+	PathGuide    = "/guide.md"
 
 	titleLimit  = 200
 	bodyLimit   = 8192
@@ -44,6 +46,7 @@ type Target struct {
 
 type Config struct {
 	Listen           string
+	Version          string
 	Targets          []Target
 	MaxBodyBytes     int
 	DedupeSeconds    int
@@ -188,6 +191,8 @@ func (c *Channel) Start(ctx context.Context, b *bus.Bus) error {
 	mux.HandleFunc(PathNotify, c.handleNotify)
 	mux.HandleFunc(PathRequest, c.handleRequest)
 	mux.HandleFunc(PathHealth, c.handleHealth)
+	mux.HandleFunc(PathManifest, c.handleManifest)
+	mux.HandleFunc(PathGuide, c.handleGuide)
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,

@@ -159,6 +159,7 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		}
 		h := httpchan.New(httpchan.Config{
 			Listen:           cfg.HTTP.Listen,
+			Version:          d.version,
 			Targets:          targets,
 			MaxBodyBytes:     cfg.HTTP.MaxBodyBytes,
 			DedupeSeconds:    cfg.HTTP.DedupeSeconds,
