@@ -6,7 +6,7 @@
 ## 能力边界
 
 - ivan 是无人值守后台 agent；`/request` 为**异步**入口：受理即返回会话键，结果靠轮询，没有回调/推送
-- 通知与请求结果的**出站目标只由服务端配置 `http.targets` 决定**（fan-out 全部目标），请求方不能指定发给谁
+- 通知与请求结果的**出站目标由各通道的默认通知出口自决**（通道决定发给谁），请求方不能指定发给谁，也无需预先知道任何收件人标识
 - 无鉴权，仅限内网使用，不要暴露公网
 - JSON 请求需 `Content-Type: application/json`；错误统一 `{"status":"rejected","message":"<原因>"}` + 对应状态码
 
@@ -23,16 +23,16 @@
 
 ## POST /notify
 
-把一条通知经 ivan 广播给配置目标。尽力而为，不保证送达。
+把一条通知广播给 ivan 的各通道通知出口。尽力而为，不保证送达。
 
-请求体（`title` 与 `body` 至少一项非空）：
+请求体（`source` 必填；`title` 与 `body` 至少一项非空）：
 
 ```json
 {"source":"ci","severity":"error","title":"构建失败","body":"job #123 exit 1","dedupe_key":"build-123"}
 ```
 
 - `severity`：`info`（默认，无前缀）；其他值渲染为 `[<severity>] 标题`
-- `source` 非空时正文末尾追加 `— <source>` 脚注
+- `source`（来源服务名，必填）正文末尾追加 `— <source>` 脚注
 - 长度按字符计：`title` ≤ 200、`body` ≤ 8192，超出截断并回执 `truncated: true`
 - `dedupe_key`：`source|dedupe_key` 去重窗口（默认 600s）内重复投递返回 `deduped`，不重复发送
 - `body` 缺省时可写 `text`（`body` 优先）
@@ -45,7 +45,8 @@
 ```
 
 - `status` 取值：`delivered` / `partial`（均 200）/ `failed`（503，含逐目标失败明细）/ `deduped`
-- 未配置 `http.targets` 时 503 `failed`；超过限额（默认 30 次/分钟）429
+- 回执 `targets[].name` 形如 `<通道名>:<通道内目标标识>`（由通道自决）
+- 没有通道实现通知出口或全部无可投递目标时 503 `failed`；超过限额（默认 30 次/分钟）429；缺 `source` 400
 
 ## POST /request
 

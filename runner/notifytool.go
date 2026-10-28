@@ -5,17 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/LaoQi/battlelab/agent"
-
-	"github.com/LaoQi/ivan/bus"
 )
 
 const sendMessageDesc = `发一条消息给用户（主动出站，尽力而为广播）。
 - 用在需要主动通知用户的场合：外部服务请求需要用户确认、长任务阶段性结论、异常告警。
-- 不选择出口：广播到配置 http.targets 登录的全部目标，投递汇总如实返回。
-- 返回 ok（全部成功）/ partial（部分成功）/ error（全部失败，正文含每个目标的失败原因）。`
+- 不选择出口：交给各通道的默认通知出口（通道自己决定发给谁），投递汇总如实返回。
+- 返回 ok（全部成功）/ partial（部分成功）/ error（全部失败或没有可投递的通知出口）。`
 
 const sendMessageParams = `{
   "type": "object",
@@ -45,41 +42,18 @@ func (r *Runner) sendMessageRun(ctx context.Context, argsJSON string) string {
 	if text == "" {
 		return "error: text 不能为空"
 	}
-	targets := r.cfg.HTTP.Targets
-	if len(targets) == 0 {
-		return "error: 没有可用的输出目标（http.targets 未配置），无法通知用户"
+	if r.opts.Notice == nil {
+		return "error: 当前进程没有通知出口，无法发送消息"
 	}
-	deliver := r.opts.NotifyStrict
-	if deliver == nil {
-		deliver = r.opts.Notify
-	}
-	if deliver == nil {
-		return "error: 当前进程没有出站投递通道，无法发送消息"
-	}
-	var okNames, fails []string
-	for _, t := range targets {
-		msg := bus.OutboundMessage{
-			Channel: t.Channel,
-			ChatID:  t.ChatID,
-			Content: text,
-			Kind:    bus.KindNotice,
-		}
-		dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := deliver(dctx, msg)
-		cancel()
-		if err == nil {
-			okNames = append(okNames, t.Name)
-		} else {
-			fails = append(fails, fmt.Sprintf("%s: %s", t.Name, briefErr(err)))
-		}
-	}
+	sent, total, names := r.opts.Notice(ctx, text)
 	switch {
-	case len(fails) == 0:
-		return fmt.Sprintf("ok: 已广播到 %d 个目标（%s）", len(okNames), strings.Join(okNames, ", "))
-	case len(okNames) == 0:
-		return "error: 全部目标投递失败：" + strings.Join(fails, "；")
+	case total == 0:
+		return "error: 没有实现通知出口的通道，无法通知用户"
+	case sent == 0:
+		return fmt.Sprintf("error: 全部通知出口投递失败（%d 个目标）", total)
+	case sent < total:
+		return fmt.Sprintf("partial: 已发 %d/%d 个目标（成功：%s）", sent, total, names)
 	default:
-		return fmt.Sprintf("partial: 已发 %d/%d 个目标（成功：%s；失败：%s）",
-			len(okNames), len(targets), strings.Join(okNames, ", "), strings.Join(fails, "；"))
+		return fmt.Sprintf("ok: 已广播到 %d 个目标（%s）", sent, names)
 	}
 }

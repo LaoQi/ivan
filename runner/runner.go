@@ -20,15 +20,15 @@ import (
 )
 
 type Options struct {
-	Cfg          *config.Config
-	Log          *data.EventLog
-	Human        *chlog.Sink
-	State        *data.State
-	Bus          *bus.Bus
-	Stream       io.Writer
-	Notify       func(ctx context.Context, msg bus.OutboundMessage) error
-	NotifyStrict func(ctx context.Context, msg bus.OutboundMessage) error
-	Paused       func() bool
+	Cfg    *config.Config
+	Log    *data.EventLog
+	Human  *chlog.Sink
+	State  *data.State
+	Bus    *bus.Bus
+	Stream io.Writer
+	Notify func(ctx context.Context, msg bus.OutboundMessage) error
+	Notice func(ctx context.Context, content string) (sent, total int, names string)
+	Paused func() bool
 }
 
 type Turn struct {

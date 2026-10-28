@@ -96,25 +96,18 @@ type QQConfig struct {
 	ReconnectMaxSec int      `yaml:"reconnect_max_sec"`
 }
 
-type HTTPTargetConfig struct {
-	Name    string `yaml:"name"`
-	Channel string `yaml:"channel"`
-	ChatID  string `yaml:"chat_id"`
-}
-
 type HTTPRequestConfig struct {
 	Session string `yaml:"session"`
 }
 
 type HTTPConfig struct {
-	Enabled          bool               `yaml:"enabled"`
-	Listen           string             `yaml:"listen"`
-	MaxBodyBytes     int                `yaml:"max_body_bytes"`
-	DedupeSeconds    int                `yaml:"dedupe_seconds"`
-	NotifyPerMinute  int                `yaml:"notify_per_minute"`
-	RequestPerMinute int                `yaml:"request_per_minute"`
-	Targets          []HTTPTargetConfig `yaml:"targets"`
-	Request          HTTPRequestConfig  `yaml:"request"`
+	Enabled          bool              `yaml:"enabled"`
+	Listen           string            `yaml:"listen"`
+	MaxBodyBytes     int               `yaml:"max_body_bytes"`
+	DedupeSeconds    int               `yaml:"dedupe_seconds"`
+	NotifyPerMinute  int               `yaml:"notify_per_minute"`
+	RequestPerMinute int               `yaml:"request_per_minute"`
+	Request          HTTPRequestConfig `yaml:"request"`
 }
 
 type ChannelsConfig struct {
@@ -239,9 +232,6 @@ func Load(path string) (*Config, error) {
 		borrowTanya(cfg)
 	}
 	cfg.normalize()
-	if err := cfg.ValidateHTTP(); err != nil {
-		return nil, err
-	}
 	if cfg.Runner.HandoffForceTokens <= cfg.Runner.HandoffHintTokens {
 		return nil, fmt.Errorf("handoff_force_tokens(%d) 必须大于 handoff_hint_tokens(%d)",
 			cfg.Runner.HandoffForceTokens, cfg.Runner.HandoffHintTokens)
@@ -356,28 +346,6 @@ func (c *Config) normalize() {
 	if c.HTTP.RequestPerMinute < 0 {
 		c.HTTP.RequestPerMinute = DefaultHTTPRequestPerMin
 	}
-	for i := range c.HTTP.Targets {
-		c.HTTP.Targets[i].Name = strings.TrimSpace(c.HTTP.Targets[i].Name)
-		c.HTTP.Targets[i].Channel = strings.TrimSpace(c.HTTP.Targets[i].Channel)
-		c.HTTP.Targets[i].ChatID = strings.TrimSpace(c.HTTP.Targets[i].ChatID)
-	}
-}
-
-func (c *Config) ValidateHTTP() error {
-	seen := map[string]bool{}
-	for i, t := range c.HTTP.Targets {
-		if t.Name == "" {
-			return fmt.Errorf("http.targets[%d] 缺少 name", i)
-		}
-		if t.Channel == "" {
-			return fmt.Errorf("http.targets[%d] %s 缺少 channel", i, t.Name)
-		}
-		if seen[t.Name] {
-			return fmt.Errorf("http.targets 名称重复: %s", t.Name)
-		}
-		seen[t.Name] = true
-	}
-	return nil
 }
 
 func (c *Config) SocketPath() string {

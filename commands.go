@@ -713,8 +713,8 @@ func printStatus(st daemon.Status) {
 	}
 	if st.HTTP != nil {
 		h := st.HTTP
-		line := fmt.Sprintf("http      listen=%s running=%v targets=%d notify=%d delivered=%d partial=%d failed=%d deduped=%d rejected=%d",
-			h.Listen, h.Running, h.Targets, h.NotifyAccepted, h.NotifyDelivered, h.NotifyPartial, h.NotifyFailed, h.NotifyDeduped, h.NotifyRejected)
+		line := fmt.Sprintf("http      listen=%s running=%v notify=%d delivered=%d partial=%d failed=%d deduped=%d rejected=%d",
+			h.Listen, h.Running, h.NotifyAccepted, h.NotifyDelivered, h.NotifyPartial, h.NotifyFailed, h.NotifyDeduped, h.NotifyRejected)
 		line += fmt.Sprintf(" | request=%d rejected=%d", h.RequestAccepted, h.RequestRejected)
 		if h.LastError != "" {
 			line += fmt.Sprintf(" last_error=%q", h.LastError)

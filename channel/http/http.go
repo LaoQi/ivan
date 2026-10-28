@@ -35,25 +35,19 @@ const (
 
 var (
 	ErrEmpty       = errors.New("通知内容为空")
+	ErrEmptySource = errors.New("缺少 source")
 	ErrRateLimited = errors.New("请求频率超限")
 )
-
-type Target struct {
-	Name    string
-	Channel string
-	ChatID  string
-}
 
 type Config struct {
 	Listen           string
 	Version          string
-	Targets          []Target
 	MaxBodyBytes     int
 	DedupeSeconds    int
 	NotifyPerMinute  int
 	RequestPerMinute int
 	RequestSession   string
-	Deliver          func(ctx context.Context, msg bus.OutboundMessage) error
+	Broadcast        func(ctx context.Context, content string) []TargetResult
 	Submit           func(msg bus.InboundMessage) bool
 	Query            func(session string) (RequestState, bool)
 	Audit            func(kind, text string)
@@ -70,7 +64,6 @@ type RequestState struct {
 type Stats struct {
 	Listen          string    `json:"listen"`
 	Running         bool      `json:"running"`
-	Targets         int       `json:"targets"`
 	NotifyAccepted  uint64    `json:"notify_accepted"`
 	NotifyDelivered uint64    `json:"notify_delivered"`
 	NotifyPartial   uint64    `json:"notify_partial"`
@@ -176,8 +169,6 @@ func (c *Channel) Name() string { return Name }
 
 func (c *Channel) MaxLen() int { return 0 }
 
-func (c *Channel) Targets() []Target { return c.cfg.Targets }
-
 func (c *Channel) Start(ctx context.Context, b *bus.Bus) error {
 	addr := strings.TrimSpace(c.cfg.Listen)
 	if addr == "" {
@@ -255,7 +246,6 @@ func (c *Channel) Stats() Stats {
 	return Stats{
 		Listen:          listen,
 		Running:         running,
-		Targets:         len(c.cfg.Targets),
 		NotifyAccepted:  c.notifyAccepted.Load(),
 		NotifyDelivered: c.notifyDelivered.Load(),
 		NotifyPartial:   c.notifyPartial.Load(),

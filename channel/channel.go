@@ -40,6 +40,19 @@ type Splitter interface {
 	SplitOutbound(text string) []string
 }
 
+// Noticer 是通道的可选能力：默认通知出口。发给谁、怎么发由通道自己定义
+// （通道内的固定目标、活跃会话、在等请求都行），调用方不指定目标，尽力而为。
+// 未实现该能力的通道不参与通知广播。
+type Noticer interface {
+	Notice(ctx context.Context, content string) []NoticeResult
+}
+
+// NoticeResult 是一次通知在通道内一个目标上的结果。
+type NoticeResult struct {
+	Target string
+	Err    error
+}
+
 type Status struct {
 	Name        string    `json:"name"`
 	Running     bool      `json:"running"`
@@ -305,6 +318,16 @@ func (m *Manager) count(name string, fn func(*chanStat)) {
 	if st := m.status[name]; st != nil {
 		fn(st)
 	}
+}
+
+func (m *Manager) All() []Channel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Channel, 0, len(m.order))
+	for _, name := range m.order {
+		out = append(out, m.chans[name])
+	}
+	return out
 }
 
 func (m *Manager) Status() []Status {

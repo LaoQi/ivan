@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +19,7 @@ type NoticeBody struct {
 	DedupeKey string `json:"dedupe_key"`
 }
 
-type targetResult struct {
+type TargetResult struct {
 	Name    string `json:"name"`
 	Channel string `json:"channel"`
 	Result  string `json:"result"`
@@ -38,49 +37,56 @@ func (c *Channel) handleNotify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	out, err := c.notice(r.Context(), in)
+	code := http.StatusOK
+	switch {
+	case err == nil:
+	default:
+		code = http.StatusServiceUnavailable
+		if errors.Is(err, ErrEmpty) || errors.Is(err, ErrEmptySource) {
+			code = http.StatusBadRequest
+		} else if errors.Is(err, ErrRateLimited) {
+			code = http.StatusTooManyRequests
+		}
+	}
+	writeJSON(w, code, out)
+}
+
+func (c *Channel) SendNotice(ctx context.Context, in NoticeBody) (map[string]any, error) {
+	return c.notice(ctx, in)
+}
+
+func (c *Channel) notice(ctx context.Context, in NoticeBody) (map[string]any, error) {
+	source := strings.TrimSpace(in.Source)
+	if source == "" {
+		c.notifyRejected.Add(1)
+		return map[string]any{"status": "rejected", "message": "缺少 source（通知来源服务名）"}, ErrEmptySource
+	}
 	title := strings.TrimSpace(in.Title)
 	body := strings.TrimSpace(firstNonEmpty(in.Body, in.Text))
 	if title == "" && body == "" {
 		c.notifyRejected.Add(1)
-		writeErr(w, http.StatusBadRequest, ErrEmpty.Error())
-		return
-	}
-	if len(c.cfg.Targets) == 0 {
-		c.notifyFailed.Add(1)
-		c.recordErr(errors.New("未配置通知目标（http.targets 为空）"))
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "failed", "message": "未配置通知目标（http.targets 为空）", "targets": []targetResult{},
-		})
-		return
+		return map[string]any{"status": "rejected", "message": ErrEmpty.Error()}, ErrEmpty
 	}
 	if !c.notifyWin.allow(c.cfg.NotifyPerMinute, time.Now()) {
 		c.notifyRejected.Add(1)
-		c.audit("ext_notify_rejected", "rate_limited source="+bus.OneLine(in.Source, sourceLimit))
-		writeErr(w, http.StatusTooManyRequests, ErrRateLimited.Error())
-		return
+		c.audit("ext_notify_rejected", "rate_limited source="+bus.OneLine(source, sourceLimit))
+		return map[string]any{"status": "rejected", "message": ErrRateLimited.Error()}, ErrRateLimited
 	}
-	source := strings.TrimSpace(in.Source)
-	now := time.Now()
 	dedupeKey := strings.TrimSpace(in.DedupeKey)
 	if dedupeKey != "" {
 		dedupeKey = source + "|" + dedupeKey
 	}
-	if c.dedup.seen(dedupeKey, now) {
+	if c.dedup.seen(dedupeKey, time.Now()) {
 		c.notifyDeduped.Add(1)
 		c.audit("ext_notify_deduped", "source="+bus.OneLine(source, sourceLimit)+" key="+bus.OneLine(dedupeKey, 128))
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":  "deduped",
-			"message": "同一 dedupe_key 已在去重窗口内投递过",
-			"targets": []targetResult{},
-		})
-		return
+		return map[string]any{"status": "deduped", "message": "同一 dedupe_key 已在去重窗口内投递过", "targets": []TargetResult{}}, nil
 	}
-
 	content, truncated := formatNotice(title, strings.TrimSpace(in.Severity), source, body)
 	if truncated {
 		c.notifyTruncated.Add(1)
 	}
-	results, ok, partial := c.fanout(r.Context(), content)
+	results, ok, partial := c.broadcast(ctx, content)
 	c.notifyAccepted.Add(1)
 	switch {
 	case ok:
@@ -89,60 +95,58 @@ func (c *Channel) handleNotify(w http.ResponseWriter, r *http.Request) {
 		c.notifyPartial.Add(1)
 	default:
 		c.notifyFailed.Add(1)
-		c.recordErr(fmt.Errorf("通知投递全部失败: %d 个目标", len(results)))
+		c.recordErr(errors.New("通知投递全部失败: " + summarizeResults(results)))
 	}
-	c.audit("ext_notify", fmt.Sprintf("source=%s severity=%s targets=%d ok=%v partial=%v",
-		bus.OneLine(source, sourceLimit), bus.OneLine(in.Severity, 32), len(results), ok, partial))
-
-	code := http.StatusOK
-	status := "delivered"
-	switch {
-	case ok:
-	case partial:
+	c.audit("ext_notify", "source="+bus.OneLine(source, sourceLimit)+" targets="+bus.OneLine(summarizeResults(results), 128))
+	status := "failed"
+	if ok {
+		status = "delivered"
+	} else if partial {
 		status = "partial"
-		code = http.StatusOK
-	default:
-		status = "failed"
-		code = http.StatusServiceUnavailable
 	}
-	writeJSON(w, code, map[string]any{
-		"status":    status,
-		"targets":   results,
-		"deduped":   false,
-		"truncated": truncated,
-	})
+	out := map[string]any{"status": status, "targets": results, "deduped": false, "truncated": truncated}
+	if status == "failed" {
+		out["message"] = "通知投递全部失败（或没有可投递的通知出口）"
+		return out, errors.New(out["message"].(string))
+	}
+	return out, nil
 }
 
-// fanout 把同一条通知逐个投给配置的目标；任一目标失败不影响其余。
-func (c *Channel) fanout(ctx context.Context, content string) ([]targetResult, bool, bool) {
-	if c.cfg.Deliver == nil {
-		return []targetResult{{Name: "-", Result: "failed", Error: "未接出站投递钩子"}}, false, false
+func (c *Channel) broadcast(ctx context.Context, content string) ([]TargetResult, bool, bool) {
+	if c.cfg.Broadcast == nil {
+		return []TargetResult{{Name: "-", Result: "failed", Error: "通知出口未接通"}}, false, false
 	}
-	results := make([]targetResult, 0, len(c.cfg.Targets))
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	results := c.cfg.Broadcast(dctx, content)
 	sent, failed := 0, 0
-	for _, t := range c.cfg.Targets {
-		msg := bus.OutboundMessage{
-			Channel: t.Channel,
-			ChatID:  t.ChatID,
-			Content: content,
-			Kind:    bus.KindNotice,
-		}
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		err := c.cfg.Deliver(dctx, msg)
-		cancel()
-		res := targetResult{Name: t.Name, Channel: t.Channel}
-		switch {
-		case err == nil:
-			res.Result = "sent"
+	for _, r := range results {
+		switch r.Result {
+		case "sent":
 			sent++
 		default:
-			res.Result = "failed"
-			res.Error = err.Error()
 			failed++
 		}
-		results = append(results, res)
 	}
 	return results, failed == 0 && sent > 0, sent > 0 && failed > 0
+}
+
+func summarizeResults(results []TargetResult) string {
+	var b strings.Builder
+	for i, r := range results {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(r.Name)
+		b.WriteString("=")
+		b.WriteString(r.Result)
+		if r.Error != "" {
+			b.WriteString("(")
+			b.WriteString(bus.OneLine(r.Error, 64))
+			b.WriteString(")")
+		}
+	}
+	return b.String()
 }
 
 // formatNotice 组装投递正文：`[severity] title` + 正文（+ 来源脚注）。
@@ -174,66 +178,12 @@ func formatNotice(title, severity, source, body string) (string, bool) {
 		}
 	}
 	b.WriteString(body)
-	if src := strings.TrimSpace(source); src != "" {
+	if source != "" {
 		b.WriteString("\n\n— ")
-		b.WriteString(bus.OneLine(src, sourceLimit))
+		b.WriteString(bus.OneLine(source, sourceLimit))
 	}
 	if truncated {
 		b.WriteString("\n（内容过长已截断）")
 	}
 	return b.String(), truncated
-}
-
-// SendNotice 供本地入口（ivan notify 走 socket）复用同一 fan-out 管线。
-func (c *Channel) SendNotice(ctx context.Context, in NoticeBody) (map[string]any, error) {
-	title := strings.TrimSpace(in.Title)
-	body := strings.TrimSpace(firstNonEmpty(in.Body, in.Text))
-	if title == "" && body == "" {
-		return nil, ErrEmpty
-	}
-	if len(c.cfg.Targets) == 0 {
-		c.notifyFailed.Add(1)
-		return nil, errors.New("未配置通知目标（http.targets 为空）")
-	}
-	if !c.notifyWin.allow(c.cfg.NotifyPerMinute, time.Now()) {
-		c.notifyRejected.Add(1)
-		return nil, ErrRateLimited
-	}
-	source := strings.TrimSpace(in.Source)
-	dedupeKey := strings.TrimSpace(in.DedupeKey)
-	if dedupeKey != "" {
-		dedupeKey = source + "|" + dedupeKey
-	}
-	if c.dedup.seen(dedupeKey, time.Now()) {
-		c.notifyDeduped.Add(1)
-		return map[string]any{"status": "deduped", "targets": []targetResult{}}, nil
-	}
-	content, truncated := formatNotice(title, strings.TrimSpace(in.Severity), source, body)
-	if truncated {
-		c.notifyTruncated.Add(1)
-	}
-	results, ok, partial := c.fanout(ctx, content)
-	c.notifyAccepted.Add(1)
-	switch {
-	case ok:
-		c.notifyDelivered.Add(1)
-	case partial:
-		c.notifyPartial.Add(1)
-	default:
-		c.notifyFailed.Add(1)
-		c.recordErr(fmt.Errorf("通知投递全部失败: %d 个目标", len(results)))
-	}
-	c.audit("ext_notify", fmt.Sprintf("source=%s targets=%d ok=%v partial=%v local=true",
-		bus.OneLine(source, sourceLimit), len(results), ok, partial))
-	status := "failed"
-	if ok {
-		status = "delivered"
-	} else if partial {
-		status = "partial"
-	}
-	out := map[string]any{"status": status, "targets": results, "truncated": truncated}
-	if status == "failed" {
-		return out, errors.New("通知投递全部失败")
-	}
-	return out, nil
 }

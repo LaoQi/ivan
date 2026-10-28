@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,25 +16,42 @@ import (
 )
 
 type recorder struct {
-	mu   sync.Mutex
-	sent []bus.OutboundMessage
-	err  error
+	mu       sync.Mutex
+	sent     []string
+	err      error
+	failOne  string
+	noTarget bool
 }
 
-func (r *recorder) deliver(ctx context.Context, m bus.OutboundMessage) error {
+func (r *recorder) broadcast(ctx context.Context, content string) []TargetResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.err != nil {
-		return r.err
+	if r.noTarget {
+		return nil
 	}
-	r.sent = append(r.sent, m)
-	return nil
+	r.sent = append(r.sent, content)
+	if r.err != nil {
+		return []TargetResult{
+			{Name: "qq:u1", Channel: "qq", Result: "failed", Error: r.err.Error()},
+			{Name: "qq:u2", Channel: "qq", Result: "failed", Error: r.err.Error()},
+		}
+	}
+	if r.failOne != "" {
+		return []TargetResult{
+			{Name: "qq:u1", Channel: "qq", Result: "sent"},
+			{Name: "qq:u2", Channel: "qq", Result: "failed", Error: r.failOne},
+		}
+	}
+	return []TargetResult{
+		{Name: "qq:u1", Channel: "qq", Result: "sent"},
+		{Name: "qq:u2", Channel: "qq", Result: "sent"},
+	}
 }
 
-func (r *recorder) messages() []bus.OutboundMessage {
+func (r *recorder) contents() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]bus.OutboundMessage(nil), r.sent...)
+	return append([]string(nil), r.sent...)
 }
 
 func newTestChannel(t *testing.T, rec *recorder, submit func(bus.InboundMessage) bool) *Channel {
@@ -52,12 +68,8 @@ func newTestChannel(t *testing.T, rec *recorder, submit func(bus.InboundMessage)
 		DedupeSeconds:    60,
 		NotifyPerMinute:  30,
 		RequestPerMinute: 5,
-		Targets: []Target{
-			{Name: "main", Channel: "qq", ChatID: "u1"},
-			{Name: "backup", Channel: "qq", ChatID: "u2"},
-		},
-		Deliver: rec.deliver,
-		Submit:  submit,
+		Broadcast:        rec.broadcast,
+		Submit:           submit,
 	})
 	if err := c.Start(context.Background(), bus.New(4, 4)); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -107,7 +119,7 @@ func doJSON(t *testing.T, method, url string, body any) (*http.Response, map[str
 	return resp, out
 }
 
-func TestNotifyFanoutToAllTargets(t *testing.T) {
+func TestNotifyBroadcast(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
 	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{
@@ -119,45 +131,30 @@ func TestNotifyFanoutToAllTargets(t *testing.T) {
 	if out["status"] != "delivered" {
 		t.Fatalf("status = %v", out["status"])
 	}
-	msgs := rec.messages()
-	if len(msgs) != 2 {
-		t.Fatalf("投递条数 = %d, want 2", len(msgs))
+	trs, _ := out["targets"].([]any)
+	if len(trs) != 2 || trs[0].(map[string]any)["name"] != "qq:u1" || trs[0].(map[string]any)["result"] != "sent" {
+		t.Fatalf("targets = %v", out["targets"])
 	}
-	if msgs[0].Channel != "qq" || msgs[0].ChatID != "u1" || msgs[1].ChatID != "u2" {
-		t.Fatalf("目标不对: %+v", msgs)
+	contents := rec.contents()
+	if len(contents) != 1 {
+		t.Fatalf("广播次数 = %d, want 1", len(contents))
 	}
-	if msgs[0].Kind != bus.KindNotice {
-		t.Fatalf("Kind = %q, want notice", msgs[0].Kind)
+	if !strings.Contains(contents[0], "[error] 构建失败") || !strings.Contains(contents[0], "job #123 exit 1") {
+		t.Fatalf("正文格式不对: %q", contents[0])
 	}
-	if !strings.Contains(msgs[0].Content, "[error] 构建失败") || !strings.Contains(msgs[0].Content, "job #123 exit 1") {
-		t.Fatalf("正文格式不对: %q", msgs[0].Content)
-	}
-	if !strings.Contains(msgs[0].Content, "— ci") {
-		t.Fatalf("缺少来源脚注: %q", msgs[0].Content)
+	if !strings.Contains(contents[0], "— ci") {
+		t.Fatalf("缺少来源脚注: %q", contents[0])
 	}
 }
 
 func TestNotifyPartialAndAllFailed(t *testing.T) {
-	var failAll atomic.Bool
-	rec := &recorder{}
+	rec := &recorder{failOne: "平台拒收"}
 	c := newTestChannel(t, rec, nil)
-	c.cfg.Deliver = func(ctx context.Context, m bus.OutboundMessage) error {
-		if failAll.Load() {
-			return errors.New("全挂")
-		}
-		if m.ChatID == "u2" {
-			return errors.New("平台拒收")
-		}
-		return rec.deliver(ctx, m)
-	}
-	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "x"})
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "x", "source": "ci"})
 	if resp.StatusCode != http.StatusOK || out["status"] != "partial" {
 		t.Fatalf("部分失败应 200 partial: %d %v", resp.StatusCode, out)
 	}
 	trs, _ := out["targets"].([]any)
-	if len(trs) != 2 {
-		t.Fatalf("targets = %v", out["targets"])
-	}
 	first := trs[0].(map[string]any)
 	second := trs[1].(map[string]any)
 	if first["result"] != "sent" || second["result"] != "failed" {
@@ -167,8 +164,8 @@ func TestNotifyPartialAndAllFailed(t *testing.T) {
 		t.Fatalf("失败原因未回报: %v", second)
 	}
 
-	failAll.Store(true)
-	resp, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "y"})
+	rec.err = errors.New("全挂")
+	resp, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "y", "source": "ci"})
 	if resp.StatusCode != http.StatusServiceUnavailable || out["status"] != "failed" {
 		t.Fatalf("全失败应 503 failed: %d %v", resp.StatusCode, out)
 	}
@@ -177,17 +174,28 @@ func TestNotifyPartialAndAllFailed(t *testing.T) {
 func TestNotifyPlainTextAndEmpty(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
-	resp, _ := doJSON(t, http.MethodPost, c.url(t, PathNotify), "磁盘快满了")
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), "磁盘快满了")
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(fmt.Sprint(out["message"]), "source") {
+		t.Fatalf("纯文本无 source 应 400: %d %v", resp.StatusCode, out)
+	}
+	resp, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "磁盘快满了", "source": "ops"})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("纯文本应受理: %d", resp.StatusCode)
+		t.Fatalf("纯文本带 source 应受理: %d", resp.StatusCode)
 	}
-	msgs := rec.messages()
-	if len(msgs) != 2 || !strings.Contains(msgs[0].Content, "磁盘快满了") {
-		t.Fatalf("纯文本正文未投递: %+v", msgs)
+	contents := rec.contents()
+	if len(contents) != 1 || !strings.Contains(contents[0], "磁盘快满了") {
+		t.Fatalf("纯文本正文未投递: %v", contents)
 	}
-	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"title": "  ", "body": " "})
+	resp, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"title": "  ", "body": " ", "source": "ops"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("空内容应 400: %d %v", resp.StatusCode, out)
+	}
+	resp, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"title": "t", "body": "b"})
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(fmt.Sprint(out["message"]), "source") {
+		t.Fatalf("缺 source 应 400: %d %v", resp.StatusCode, out)
+	}
+	if c.Stats().NotifyRejected == 0 {
+		t.Fatal("缺 source 未计数")
 	}
 }
 
@@ -203,7 +211,7 @@ func TestNotifyDedupe(t *testing.T) {
 	if out["status"] != "deduped" {
 		t.Fatalf("重复应去重: %v", out)
 	}
-	if n := len(rec.messages()); n != 2 {
+	if n := len(rec.contents()); n != 1 {
 		t.Fatalf("去重后不应再投递, 投递数 = %d", n)
 	}
 	// 不同 source 的同名 key 不算重复
@@ -213,8 +221,8 @@ func TestNotifyDedupe(t *testing.T) {
 		t.Fatalf("不同 source 不应去重: %v", out)
 	}
 	// 无 key 不去重
-	_, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key"})
-	_, out2 := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key"})
+	_, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key", "source": "ci"})
+	_, out2 := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key", "source": "ci"})
 	if out["status"] != "delivered" || out2["status"] != "delivered" {
 		t.Fatalf("无 dedupe_key 不应去重: %v %v", out, out2)
 	}
@@ -225,12 +233,12 @@ func TestNotifyRateLimit(t *testing.T) {
 	c := newTestChannel(t, rec, nil)
 	c.cfg.NotifyPerMinute = 2
 	for i := 0; i < 2; i++ {
-		resp, _ := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": fmt.Sprintf("n%d", i)})
+		resp, _ := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": fmt.Sprintf("n%d", i), "source": "ci"})
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("第 %d 条应放行: %d", i+1, resp.StatusCode)
 		}
 	}
-	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "n3"})
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "n3", "source": "ci"})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("超限应 429: %d %v", resp.StatusCode, out)
 	}
@@ -243,16 +251,16 @@ func TestNotifyBodyTooLargeAndTruncation(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
 	long := strings.Repeat("啊", 12000)
-	resp, _ := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": long})
+	resp, _ := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": long, "source": "ci"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("超长正文应截断受理: %d", resp.StatusCode)
 	}
-	msgs := rec.messages()
-	if len(msgs) != 2 {
-		t.Fatalf("投递条数 = %d", len(msgs))
+	contents := rec.contents()
+	if len(contents) != 1 {
+		t.Fatalf("广播次数 = %d", len(contents))
 	}
-	if bus.RuneLen(msgs[0].Content) > bodyLimit+100 {
-		t.Fatalf("正文未截断: %d 字符", bus.RuneLen(msgs[0].Content))
+	if bus.RuneLen(contents[0]) > bodyLimit+100 {
+		t.Fatalf("正文未截断: %d 字符", bus.RuneLen(contents[0]))
 	}
 	if c.Stats().NotifyTruncated != 1 {
 		t.Fatalf("截断未计数: %d", c.Stats().NotifyTruncated)
@@ -260,7 +268,7 @@ func TestNotifyBodyTooLargeAndTruncation(t *testing.T) {
 
 	// 超过 body 上限：413/400 皆可，但必须拒绝
 	huge := strings.Repeat("x", 70000)
-	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": huge})
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": huge, "source": "ci"})
 	if resp.StatusCode == http.StatusOK {
 		t.Fatalf("超上限请求体不应受理: %v", out)
 	}
@@ -437,27 +445,17 @@ func TestFormatNoticeSeverityAndTitleOnly(t *testing.T) {
 	}
 }
 
-func TestNotifyWithoutTargets(t *testing.T) {
-	c := New(Config{
-		Listen:           "127.0.0.1:0",
-		NotifyPerMinute:  30,
-		RequestPerMinute: 5,
-		Deliver:          func(context.Context, bus.OutboundMessage) error { return nil },
-		Submit:           func(bus.InboundMessage) bool { return true },
-	})
-	if err := c.Start(context.Background(), bus.New(4, 4)); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Stop(context.Background()) })
-	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"title": "t", "body": "b"})
-	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(fmt.Sprint(out["message"]), "未配置通知目标") {
-		t.Fatalf("无 targets 应明确失败: %d %v", resp.StatusCode, out)
+func TestNotifyNoDeliveryTarget(t *testing.T) {
+	rec := &recorder{noTarget: true}
+	c := newTestChannel(t, rec, nil)
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"title": "t", "body": "b", "source": "ci"})
+	if resp.StatusCode != http.StatusServiceUnavailable || out["status"] != "failed" {
+		t.Fatalf("无可投递目标应 503 failed: %d %v", resp.StatusCode, out)
 	}
 	if c.Stats().NotifyFailed != 1 {
 		t.Fatalf("应计 failed: %+v", c.Stats())
 	}
-	if _, err := c.SendNotice(context.Background(), NoticeBody{Title: "t"}); err == nil ||
-		!strings.Contains(err.Error(), "未配置通知目标") {
+	if _, err := c.SendNotice(context.Background(), NoticeBody{Title: "t", Body: "b", Source: "ci"}); err == nil {
 		t.Fatalf("本地入口应同样明确报错: %v", err)
 	}
 }
@@ -465,11 +463,11 @@ func TestNotifyWithoutTargets(t *testing.T) {
 func TestStatsCounters(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
-	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "a"})
-	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k"})
-	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k"})
+	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "a", "source": "ci"})
+	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k", "source": "ci"})
+	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k", "source": "ci"})
 	st := c.Stats()
-	if !st.Running || st.Targets != 2 || st.NotifyAccepted != 2 || st.NotifyDelivered != 2 || st.NotifyDeduped != 1 {
+	if !st.Running || st.NotifyAccepted != 2 || st.NotifyDelivered != 2 || st.NotifyDeduped != 1 {
 		t.Fatalf("统计不对: %+v", st)
 	}
 	if !strings.HasPrefix(st.Listen, "127.0.0.1:") || strings.HasSuffix(st.Listen, ":0") {

@@ -2,19 +2,51 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/LaoQi/ivan/bus"
+	"github.com/LaoQi/ivan/channel"
 	"github.com/LaoQi/ivan/channel/cli"
 	"github.com/LaoQi/ivan/config"
 	"github.com/LaoQi/ivan/data"
 	"github.com/LaoQi/ivan/internal/fakellm"
 )
+
+type fakeNoticeChan struct {
+	name    string
+	mu      sync.Mutex
+	got     []string
+	results []channel.NoticeResult
+}
+
+func (f *fakeNoticeChan) Name() string { return f.name }
+func (f *fakeNoticeChan) MaxLen() int  { return 0 }
+func (f *fakeNoticeChan) Start(ctx context.Context, b *bus.Bus) error {
+	return nil
+}
+func (f *fakeNoticeChan) Stop(ctx context.Context) error { return nil }
+func (f *fakeNoticeChan) Send(ctx context.Context, m bus.OutboundMessage) error {
+	return fmt.Errorf("%w: 测试通道不做定向投递", channel.ErrUnroutable)
+}
+func (f *fakeNoticeChan) Notice(ctx context.Context, content string) []channel.NoticeResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.got = append(f.got, content)
+	return f.results
+}
+func (f *fakeNoticeChan) received() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.got...)
+}
 
 func httpConfig(t *testing.T, srv *fakellm.Server) *config.Config {
 	t.Helper()
@@ -23,7 +55,6 @@ func httpConfig(t *testing.T, srv *fakellm.Server) *config.Config {
 	cfg.HTTP.Listen = "127.0.0.1:0"
 	cfg.HTTP.NotifyPerMinute = 100
 	cfg.HTTP.RequestPerMinute = 100
-	cfg.HTTP.Targets = []config.HTTPTargetConfig{{Name: "main", Channel: "cli", ChatID: "unused"}}
 	return cfg
 }
 
@@ -60,31 +91,42 @@ func postJSON(t *testing.T, url string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-// 通知经 HTTP 入口投递到真实通道（cli 目标无在等请求 → 计 unmatched，回执里如实反映）。
-func TestHTTPNotifyFanoutReportsPerTargetResult(t *testing.T) {
+// 通知经 HTTP 入口广播到通道的默认通知出口（Noticer 能力），逐目标结果如实回执。
+func TestHTTPNotifyViaNoticer(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Content: "unused"})
 	defer srv.Close()
 	cfg := httpConfig(t, srv)
 	run := start(t, cfg)
 	defer run.stop(t)
+	fc := &fakeNoticeChan{name: "faken", results: []channel.NoticeResult{
+		{Target: "u1"},
+		{Target: "u2", Err: context.DeadlineExceeded},
+	}}
+	if err := run.d.mgr.Register(fc); err != nil {
+		t.Fatalf("register: %v", err)
+	}
 
 	base := "http://" + httpListen(t, cfg)
 	code, out := postJSON(t, base+"/notify", map[string]string{
 		"title": "构建失败", "body": "job #123 exit 1", "severity": "error", "source": "ci",
 	})
-	if code != http.StatusServiceUnavailable {
-		t.Fatalf("cli 目标无在等请求应报全部失败: %d %v", code, out)
+	if code != http.StatusOK || out["status"] != "partial" {
+		t.Fatalf("部分成功应 200 partial: %d %v", code, out)
 	}
 	targets, _ := out["targets"].([]any)
-	if len(targets) != 1 {
+	if len(targets) != 2 {
 		t.Fatalf("targets = %v", out["targets"])
 	}
 	first := targets[0].(map[string]any)
-	if first["name"] != "main" || first["result"] != "failed" || !strings.Contains(fmt.Sprint(first["error"]), "没有可投递目标") {
-		t.Fatalf("逐目标结果未如实回报: %v", first)
+	second := targets[1].(map[string]any)
+	if first["name"] != "faken:u1" || first["result"] != "sent" || second["result"] != "failed" {
+		t.Fatalf("逐目标结果未如实回报: %v %v", first, second)
+	}
+	if got := fc.received(); len(got) != 1 || !strings.Contains(got[0], "— ci") {
+		t.Fatalf("广播内容不对: %v", got)
 	}
 	st := fetchStatus(t, cfg)
-	if st.HTTP == nil || st.HTTP.NotifyAccepted != 1 || st.HTTP.NotifyFailed != 1 {
+	if st.HTTP == nil || st.HTTP.NotifyAccepted != 1 || st.HTTP.NotifyPartial != 1 {
 		t.Fatalf("HTTP 统计异常: %+v", st.HTTP)
 	}
 }
@@ -145,8 +187,7 @@ func TestHTTPRequestAsyncPollResult(t *testing.T) {
 	}
 }
 
-// 回合里的 send_message 广播到全部目标；不可达目标（cli 无在等请求）如实进入 partial 汇总，
-// 模型看到的是真实投递结果而不是假 ok。
+// 回合里的 send_message 广播到各通道的通知出口；全部失败时模型看到真实结果而不是假 ok。
 func TestHTTPSendMessageToolFanout(t *testing.T) {
 	srv := fakellm.New(
 		fakellm.Step{Tools: []fakellm.ToolCall{{ID: "c1", Name: "send_message", Args: `{"text":"构建失败已确认，请指示"}`}}},
@@ -154,9 +195,14 @@ func TestHTTPSendMessageToolFanout(t *testing.T) {
 	)
 	defer srv.Close()
 	cfg := httpConfig(t, srv)
-	cfg.HTTP.Targets = []config.HTTPTargetConfig{{Name: "main", Channel: "cli", ChatID: "user-cli"}}
 	run := start(t, cfg)
 	defer run.stop(t)
+	fc := &fakeNoticeChan{name: "faken", results: []channel.NoticeResult{
+		{Target: "u1", Err: context.DeadlineExceeded},
+	}}
+	if err := run.d.mgr.Register(fc); err != nil {
+		t.Fatalf("register: %v", err)
+	}
 
 	base := "http://" + httpListen(t, cfg)
 	code, out := postJSON(t, base+"/request", map[string]string{
@@ -177,7 +223,7 @@ func TestHTTPSendMessageToolFanout(t *testing.T) {
 				}
 			}
 			if toolReceipt != "" {
-				if !strings.Contains(toolReceipt, "error: 全部目标投递失败") || !strings.Contains(toolReceipt, "main") {
+				if !strings.Contains(toolReceipt, "error: 全部通知出口投递失败") {
 					t.Fatalf("投递失败应如实回报给模型: %s", toolReceipt)
 				}
 				return
@@ -188,25 +234,17 @@ func TestHTTPSendMessageToolFanout(t *testing.T) {
 	t.Fatal("未观察到 send_message 的工具回执")
 }
 
-// 本地入口 ivan notify 走 socket，复用同一 fan-out 管线（这里用挂起的 cli 请求当投递目标）。
+// 本地入口 ivan notify 走 socket，复用同一通知广播管线。
 func TestNotifyControlOp(t *testing.T) {
-	// 用慢回复把 cli 请求的 pending 留住，通知才有可投递目标。
-	srv := fakellm.NewDelay(2*time.Second, fakellm.Step{Content: "占位回复"})
+	srv := fakellm.New(fakellm.Step{Content: "unused"})
 	defer srv.Close()
 	cfg := httpConfig(t, srv)
-	cfg.HTTP.Targets = []config.HTTPTargetConfig{{Name: "main", Channel: "cli", ChatID: "notify-target"}}
 	run := start(t, cfg)
 	defer run.stop(t)
-
-	holder, err := cli.Dial(cfg.SocketPath(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
+	fc := &fakeNoticeChan{name: "faken", results: []channel.NoticeResult{{Target: "u1"}}}
+	if err := run.d.mgr.Register(fc); err != nil {
+		t.Fatalf("register: %v", err)
 	}
-	defer holder.Close()
-	if err := holder.Do(cli.Frame{ID: "notify-target", Op: cli.OpSend, Text: "占位请求"}); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	time.Sleep(100 * time.Millisecond)
 
 	payload := `{"title":"磁盘告警","body":"根分区 92%","severity":"warn","source":"node-exporter"}`
 	raw, err := cli.Call(cfg.SocketPath(), cli.OpNotify, payload, 5*time.Second)
@@ -223,7 +261,7 @@ func TestNotifyControlOp(t *testing.T) {
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("解析回执: %v", err)
 	}
-	if res.Status != "delivered" || len(res.Targets) != 1 || res.Targets[0].Name != "main" || res.Targets[0].Result != "sent" {
+	if res.Status != "delivered" || len(res.Targets) != 1 || res.Targets[0].Name != "faken:u1" || res.Targets[0].Result != "sent" {
 		t.Fatalf("回执缺少逐目标结果: %s", raw)
 	}
 	st := fetchStatus(t, cfg)
@@ -252,13 +290,13 @@ func TestHTTPEnabledByDefault(t *testing.T) {
 	run := start(t, cfg)
 	defer run.stop(t)
 	st := fetchStatus(t, cfg)
-	if st.HTTP == nil || !st.HTTP.Running || st.HTTP.Targets != 0 {
-		t.Fatalf("默认应启用 HTTP 入口（targets 可为空）: %+v", st.HTTP)
+	if st.HTTP == nil || !st.HTTP.Running {
+		t.Fatalf("默认应启用 HTTP 入口: %+v", st.HTTP)
 	}
 	base := "http://" + httpListen(t, cfg)
-	code, out := postJSON(t, base+"/notify", map[string]string{"title": "t", "body": "b"})
-	if code != http.StatusServiceUnavailable || !strings.Contains(fmt.Sprint(out["message"]), "未配置通知目标") {
-		t.Fatalf("无 targets 时 /notify 应明确失败: %d %v", code, out)
+	code, out := postJSON(t, base+"/notify", map[string]string{"title": "t", "body": "b", "source": "ci"})
+	if code != http.StatusServiceUnavailable || !strings.Contains(fmt.Sprint(out["message"]), "通知出口") {
+		t.Fatalf("无通知出口通道时 /notify 应明确失败: %d %v", code, out)
 	}
 	code, out = postJSON(t, base+"/request", map[string]string{"source": "ci", "purpose": "p", "text": "只读检查磁盘"})
 	if code != http.StatusAccepted {

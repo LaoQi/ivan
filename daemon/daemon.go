@@ -153,20 +153,15 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		d.qq = qq
 	}
 	if cfg.HTTP.Enabled {
-		targets := make([]httpchan.Target, 0, len(cfg.HTTP.Targets))
-		for _, t := range cfg.HTTP.Targets {
-			targets = append(targets, httpchan.Target{Name: t.Name, Channel: t.Channel, ChatID: t.ChatID})
-		}
 		h := httpchan.New(httpchan.Config{
 			Listen:           cfg.HTTP.Listen,
 			Version:          d.version,
-			Targets:          targets,
 			MaxBodyBytes:     cfg.HTTP.MaxBodyBytes,
 			DedupeSeconds:    cfg.HTTP.DedupeSeconds,
 			NotifyPerMinute:  cfg.HTTP.NotifyPerMinute,
 			RequestPerMinute: cfg.HTTP.RequestPerMinute,
 			RequestSession:   cfg.HTTP.Request.Session,
-			Deliver:          d.deliverStrict,
+			Broadcast:        d.broadcastNotice,
 			Submit:           func(m bus.InboundMessage) bool { return d.bus.Publish(m) },
 			Query: func(session string) (httpchan.RequestState, bool) {
 				r := d.runner
@@ -201,14 +196,14 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		}
 	}
 	r, err := runner.New(runner.Options{
-		Cfg:          cfg,
-		Log:          events,
-		Human:        d.human,
-		State:        state,
-		Bus:          d.bus,
-		Notify:       func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
-		NotifyStrict: d.deliverStrict,
-		Paused:       d.paused,
+		Cfg:    cfg,
+		Log:    events,
+		Human:  d.human,
+		State:  state,
+		Bus:    d.bus,
+		Notify: func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
+		Notice: d.noticeSummary,
+		Paused: d.paused,
 	})
 	if err != nil {
 		d.Release()
@@ -451,6 +446,48 @@ func (d *Daemon) Control(op, arg string) (any, error) {
 // deliverStrict 是通知类出站的投递钩子：与 Manager.Route 相同，但把"通道没有可投递目标"
 // （如 cli 无在等请求，Route 只计 unmatched 并返回 nil）如实回报给调用方，回执才不撒谎。
 // 串行化是为了让 unmatched 计数差可靠；通知投递低频，吞吐不是目标。
+func (d *Daemon) broadcastNotice(ctx context.Context, content string) []httpchan.TargetResult {
+	var out []httpchan.TargetResult
+	for _, ch := range d.mgr.All() {
+		n, ok := ch.(channel.Noticer)
+		if !ok {
+			continue
+		}
+		results := n.Notice(ctx, content)
+		if len(results) == 0 {
+			out = append(out, httpchan.TargetResult{Name: ch.Name(), Channel: ch.Name(), Result: "no_targets", Error: "通道当前没有可投递目标"})
+			continue
+		}
+		for _, r := range results {
+			tr := httpchan.TargetResult{Name: ch.Name() + ":" + r.Target, Channel: ch.Name(), Result: "sent"}
+			if r.Err != nil {
+				tr.Result = "failed"
+				tr.Error = bus.OneLine(r.Err.Error(), 128)
+			}
+			out = append(out, tr)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, httpchan.TargetResult{Name: "-", Result: "no_targets", Error: "没有实现通知出口的通道"})
+	}
+	return out
+}
+
+func (d *Daemon) noticeSummary(ctx context.Context, content string) (int, int, string) {
+	results := d.broadcastNotice(ctx, content)
+	sent, failed := 0, 0
+	var names []string
+	for _, r := range results {
+		if r.Result == "sent" {
+			sent++
+			names = append(names, r.Name)
+		} else {
+			failed++
+		}
+	}
+	return sent, len(results), strings.Join(names, ", ")
+}
+
 func (d *Daemon) deliverStrict(ctx context.Context, m bus.OutboundMessage) error {
 	d.deliverMu.Lock()
 	defer d.deliverMu.Unlock()

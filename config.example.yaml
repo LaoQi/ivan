@@ -86,7 +86,7 @@ schedule:
 # 外部入口（HTTP；见 docs/notify.md）
 http:
   # 是否启用 HTTP 入口（两个端点：/notify 纯转发通知、/request 与 agent 沟通）
-  # 默认开启；targets 为空时 /notify 明确报错、/request 照常可用
+  # 默认开启；通知出口由各通道的 Noticer 能力自决（当前通道都未实现时 /notify 明确报错）
   enabled: true
   # 监听地址；仅内网使用，当前不做鉴权，切勿暴露公网
   listen: 127.0.0.1:8787
@@ -98,10 +98,7 @@ http:
   notify_per_minute: 30
   request_per_minute: 5
   # /request 为异步：提交即返回会话键，结果用 GET /request?session=<会话键> 轮询
-  # 通知目标：/notify 与 send_message 工具都广播这里登记的全部目标（尽力而为）
-  # qq 目标需 channels.qq.allow_proactive=true 才能主动发（平台频控 + 用户可关，非必达）
-  targets: []
-  #   - {name: main, channel: qq, chat_id: "<openid>"}
+  # /notify 与 send_message 的投递不配置目标：交给各通道的默认通知出口（尽力而为）
   request:
     # /request 的会话键；空 = 按来源派生 http:<source>（每个服务一个连续上下文）
     session: ""
