@@ -166,6 +166,7 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 	if r.Scheduler() != nil {
 		list = append(list, r.scheduleTool(inst))
 	}
+	list = append(list, r.sendMessageTool(inst))
 	ag, err = agent.New(&r.cfg.Config,
 		agent.WithSystemPrompt(prompt.System(prompt.Info{
 			Workspace: inst.ws,

@@ -2,16 +2,19 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LaoQi/ivan/bus"
 	"github.com/LaoQi/ivan/channel"
 	"github.com/LaoQi/ivan/channel/cli"
+	httpchan "github.com/LaoQi/ivan/channel/http"
 	chlog "github.com/LaoQi/ivan/channel/log"
 	qqchan "github.com/LaoQi/ivan/channel/qq"
 	"github.com/LaoQi/ivan/config"
@@ -48,6 +51,7 @@ type Status struct {
 	Runner        runner.Status    `json:"runner"`
 	Channels      []channel.Status `json:"channels"`
 	QQ            qqbot.Stats      `json:"qq,omitempty"`
+	HTTP          *httpchan.Stats  `json:"http,omitempty"`
 	Schedule      *schedule.Status `json:"schedule,omitempty"`
 	ScheduleError string           `json:"schedule_error,omitempty"`
 }
@@ -67,12 +71,14 @@ type Daemon struct {
 	mgr      *channel.Manager
 	cli      *cli.Socket
 	qq       *qqchan.Channel
+	httpIn   *httpchan.Channel
 	runner   *runner.Runner
 	jobs     schedule.Store
 	sched    *schedule.Scheduler
 	schedErr string
 
 	releaseOnce bool
+	deliverMu   sync.Mutex
 }
 
 func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
@@ -146,6 +152,43 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		}
 		d.qq = qq
 	}
+	if cfg.HTTP.Enabled {
+		targets := make([]httpchan.Target, 0, len(cfg.HTTP.Targets))
+		for _, t := range cfg.HTTP.Targets {
+			targets = append(targets, httpchan.Target{Name: t.Name, Channel: t.Channel, ChatID: t.ChatID})
+		}
+		h := httpchan.New(httpchan.Config{
+			Listen:           cfg.HTTP.Listen,
+			Targets:          targets,
+			MaxBodyBytes:     cfg.HTTP.MaxBodyBytes,
+			DedupeSeconds:    cfg.HTTP.DedupeSeconds,
+			NotifyPerMinute:  cfg.HTTP.NotifyPerMinute,
+			RequestPerMinute: cfg.HTTP.RequestPerMinute,
+			RequestSession:   cfg.HTTP.Request.Session,
+			Deliver:          d.deliverStrict,
+			Submit:           func(m bus.InboundMessage) bool { return d.bus.Publish(m) },
+			Query: func(session string) (httpchan.RequestState, bool) {
+				r := d.runner
+				if r == nil {
+					return httpchan.RequestState{}, false
+				}
+				running, o, known := r.SessionState(session)
+				return httpchan.RequestState{
+					Running:    running,
+					Failed:     o.Failed,
+					Reply:      o.Reply,
+					FinishedAt: o.FinishedAt,
+				}, known
+			},
+			Audit: func(kind, text string) { d.events.Note(kind, text) },
+			Logf:  func(format string, args ...any) { _ = d.human.Notice(format, args...) },
+		})
+		if err := d.mgr.Register(h); err != nil {
+			d.Release()
+			return nil, err
+		}
+		d.httpIn = h
+	}
 	if cfg.Schedule.Enabled {
 		jobs, err := sqlitestore.Open(cfg.JobsDBPath())
 		if err != nil {
@@ -157,13 +200,14 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		}
 	}
 	r, err := runner.New(runner.Options{
-		Cfg:    cfg,
-		Log:    events,
-		Human:  d.human,
-		State:  state,
-		Bus:    d.bus,
-		Notify: func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
-		Paused: d.paused,
+		Cfg:          cfg,
+		Log:          events,
+		Human:        d.human,
+		State:        state,
+		Bus:          d.bus,
+		Notify:       func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
+		NotifyStrict: d.deliverStrict,
+		Paused:       d.paused,
 	})
 	if err != nil {
 		d.Release()
@@ -308,6 +352,10 @@ func (d *Daemon) Status() Status {
 	if d.qq != nil {
 		st.QQ = d.qq.Stats()
 	}
+	if d.httpIn != nil {
+		h := d.httpIn.Stats()
+		st.HTTP = &h
+	}
 	if d.sched != nil {
 		s := d.sched.Status()
 		st.Schedule = &s
@@ -358,6 +406,16 @@ func (d *Daemon) Control(op, arg string) (any, error) {
 			}
 		}()
 		return map[string]string{"id": id, "status": "started"}, nil
+	case cli.OpNotify:
+		if d.httpIn == nil {
+			return nil, errors.New("HTTP 入口未启用（http.enabled=false）")
+		}
+		// 回执逐目标列出结果；失败也照发（退出码由客户端按 status 决定），排查才有依据。
+		out, err := d.httpIn.SendNotice(context.Background(), parseNotifyArg(arg))
+		if err != nil && out != nil {
+			return out, nil
+		}
+		return out, err
 	case cli.OpCancel:
 		if d.runner == nil {
 			return nil, errors.New("runner 未装配")
@@ -387,6 +445,42 @@ func (d *Daemon) Control(op, arg string) (any, error) {
 	default:
 		return nil, fmt.Errorf("不支持的控制指令: %s", op)
 	}
+}
+
+// deliverStrict 是通知类出站的投递钩子：与 Manager.Route 相同，但把"通道没有可投递目标"
+// （如 cli 无在等请求，Route 只计 unmatched 并返回 nil）如实回报给调用方，回执才不撒谎。
+// 串行化是为了让 unmatched 计数差可靠；通知投递低频，吞吐不是目标。
+func (d *Daemon) deliverStrict(ctx context.Context, m bus.OutboundMessage) error {
+	d.deliverMu.Lock()
+	defer d.deliverMu.Unlock()
+	before := d.unmatchedOf(m.Channel)
+	err := d.mgr.Route(ctx, m)
+	if err == nil && d.unmatchedOf(m.Channel) > before {
+		return fmt.Errorf("%w: 通道 %s 当前没有可投递目标", channel.ErrUnroutable, m.Channel)
+	}
+	return err
+}
+
+func (d *Daemon) unmatchedOf(name string) int {
+	for _, st := range d.mgr.Status() {
+		if st.Name == name {
+			return st.Unmatched
+		}
+	}
+	return 0
+}
+
+// parseNotifyArg 把 ivan notify 的 JSON 参数转成 HTTP 入口的同一请求结构。
+func parseNotifyArg(arg string) httpchan.NoticeBody {
+	var in httpchan.NoticeBody
+	raw := strings.TrimSpace(arg)
+	if raw == "" {
+		return in
+	}
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return httpchan.NoticeBody{Body: raw}
+	}
+	return in
 }
 
 func (d *Daemon) jobsUnavailable() error {

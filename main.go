@@ -45,6 +45,8 @@ func run(args []string) int {
 		return cmdSend(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
+	case "notify":
+		return cmdNotify(args[1:])
 	case "jobs":
 		return cmdJobs(args[1:])
 	case "cancel":
@@ -103,6 +105,8 @@ func usage() {
   ivan jobs [list] [--json]            列出计划任务（未运行时读作业库）
   ivan jobs rm <id> | ivan jobs run <id>
                                        取消/立即执行作业（需 daemon 运行）
+  ivan notify [--title=标题] [--severity=级别] [--source=来源] "正文"
+                                       发一条通知给用户（走 HTTP 入口的同一投递管线）
   ivan pause | ivan resume             暂停/恢复无人值守触发（定时作业与自动续跑）
   ivan cancel <会话键>                 取消某会话正在跑的回合
   ivan config                          输出默认配置示例

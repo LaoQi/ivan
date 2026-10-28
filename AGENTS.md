@@ -3,11 +3,13 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P0–P4 已完成**（P4：两档阈值自动交接 建议 180K / 强制 256K、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`；P4 遗留的崩溃回合 `interrupted` 标记与记忆文件裁剪已补齐）。P0–P3：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。**P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）为保留计划，暂无实施规划**——相关子项均未实施，不要按"已交付"引用。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10。
+> 状态：**P0–P4 已完成**，另加**外部入口（HTTP 通知中心 + agent 请求，见 `docs/notify.md`）**（P4：两档阈值自动交接 建议 180K / 强制 256K、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`；P4 遗留的崩溃回合 `interrupted` 标记与记忆文件裁剪已补齐）。P0–P3：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。**P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）为保留计划，暂无实施规划**——相关子项均未实施，不要按"已交付"引用。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10、`docs/notify.md` §7。
 
 ## 设计约束
 
 - 定位只做三件事：通道、调度、会话；不做 Web UI、多渠道全家桶、语音/视频、skills/MCP、多租户
+- **外部入口**：`channel/http` 一个监听两个端点（`/notify` 纯转发通知用户、`/request` 与 agent 沟通），路径即语义、无模式开关；出站一律尽力而为广播、目标只由配置 `http.targets` 决定（外部请求体与模型都不得指定目标）；`/request` 异步：受理即返回会话键（按来源派生 `http:<source>`），结果经 `GET /request?session=` 轮询 runner 结果表，不做回执管道；`send_message` 工具广播全部 `http.targets`（不指定出口，模型不能给任意账号发消息）
+- **通知回执必须如实**：`Manager.Route` 对无目标通道只计 `unmatched` 并返回 nil，通知类直投一律经 daemon 的 `deliverStrict`（前后比对 unmatched 计数，涨了返回 `ErrUnroutable`），否则回执会谎报"已投递"
 - 复用核心库 `github.com/LaoQi/battlelab`（`agent`/`tools`/`ctty`，本地 `../battlelab`，`go.work` 联调；2026-10-22 从 tanya 抽出）；**不复用** tanya 的 `repl`/`readline`/`views` 与任何终端所有权（常驻无 TTY 场景）。库侧能力缺口在 battlelab 小步补齐，两仓 CHANGELOG 同步
 - **请求重试**：由库侧 `agent.Config.MaxRetries` 提供（`max_retries`，默认 2、`IVAN_MAX_RETRIES` 覆盖、`0` = 关闭、上限 20 越界回落），重试在库的 `Client.ChatStream` 内层完成、已输出内容后失败不再重试；无人值守路径同样生效（重试期间对通道静默），事件日志落 `retry` 条目（含错误原文与 attempt/max/delay），预算口径不变——**不要再包一层自己的重试**
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
@@ -61,6 +63,7 @@ runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
+channel/http/         外部入口：/notify 纯转发（fan-out 配置目标）+ /request 异步受理与查询（轮询回合结果）+ /healthz [已实现]
 qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 流式消息与输入状态 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
 channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、markdown 出站与降级（md.go）、msg_seq 计数、图片下载/上传、白名单 [已实现]
 schedule/             作业模型（at/every）、存储抽象 Store + 进程内实现、调度循环（wake/timer、错过策略、暂停与预算闸门）[已实现]
@@ -75,6 +78,7 @@ schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_ver
 - `docs/qq-bot.md` QQ 官方机器人协议设计、分层与抽库路径、测试策略、待核对清单
 - `docs/schedule.md` 作业模型、调度循环、`schedule` 工具、结果回灌、验收
 - `docs/sessions.md` 会话键→实例、映射持久化、回合结算与自主推进、并发背压、重启恢复
+- `docs/notify.md` 外部入口：两个端点、通知 fan-out、`send_message` 工具、`ivan notify`、配置与运维
 - `docs/refs-picoclaw.md` 参考调研快照与取舍
 
 ## 构建与测试
@@ -91,6 +95,7 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "用 run_shell 跑 pwd 并只回答�
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . status
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . jobs        # 作业列表（直接读作业库）
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . pause       # 暂停无人值守触发（定时作业 + 自动续跑）
+IVAN_DATA_DIR=/tmp/ivan-smoke go run . notify "构建失败"   # 本地通知入口（走 HTTP 入口同一 fan-out 管线）
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . cancel cli:default   # 取消某会话在跑的回合
 IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "说点长的"       # TTY 下原地刷新显示增量（重定向则只出最终答案）
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）

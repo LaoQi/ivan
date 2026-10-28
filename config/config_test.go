@@ -234,6 +234,71 @@ func TestQQMarkdownFromYAML(t *testing.T) {
 	}
 }
 
+func TestHTTPDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if !cfg.HTTP.Enabled {
+		t.Fatal("HTTP 入口应默认开启")
+	}
+	if cfg.HTTP.Listen != DefaultHTTPListen || cfg.HTTP.MaxBodyBytes != DefaultHTTPMaxBody ||
+		cfg.HTTP.DedupeSeconds != DefaultHTTPDedupeSeconds || cfg.HTTP.NotifyPerMinute != DefaultHTTPNotifyPerMin ||
+		cfg.HTTP.RequestPerMinute != DefaultHTTPRequestPerMin {
+		t.Fatalf("http 默认值异常: %+v", cfg.HTTP)
+	}
+	if err := cfg.ValidateHTTP(); err != nil {
+		t.Fatalf("无目标不应报错（/request 不依赖 targets）: %v", err)
+	}
+
+	cfg.HTTP.Targets = []HTTPTargetConfig{{Name: "main", Channel: "qq", ChatID: "u1"}}
+	if err := cfg.ValidateHTTP(); err != nil {
+		t.Fatalf("合法目标不应报错: %v", err)
+	}
+	cfg.HTTP.Targets = append(cfg.HTTP.Targets, HTTPTargetConfig{Name: "main", Channel: "qq", ChatID: "u2"})
+	if err := cfg.ValidateHTTP(); err == nil {
+		t.Fatal("重名目标应报错")
+	}
+	cfg.HTTP.Targets = []HTTPTargetConfig{{Name: "main"}}
+	if err := cfg.ValidateHTTP(); err == nil {
+		t.Fatal("缺 channel 应报错")
+	}
+}
+
+func TestHTTPConfigFromYAMLAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "data_dir: " + dir + "\nhttp:\n  enabled: true\n  listen: 0.0.0.0:9999\n  notify_per_minute: 7\n  targets:\n    - {name: main, channel: qq, chat_id: u1}\n    - {name: ops, channel: cli, chat_id: ops}\n  request:\n    session: cli:default\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IVAN_TANYA_CONFIG", filepath.Join(dir, "absent.yaml"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.HTTP.Enabled || cfg.HTTP.Listen != "0.0.0.0:9999" || cfg.HTTP.NotifyPerMinute != 7 ||
+		cfg.HTTP.Request.Session != "cli:default" {
+		t.Fatalf("http 段未生效: %+v", cfg.HTTP)
+	}
+	if len(cfg.HTTP.Targets) != 2 || cfg.HTTP.Targets[1].Name != "ops" || cfg.HTTP.Targets[0].ChatID != "u1" {
+		t.Fatalf("targets 未生效: %+v", cfg.HTTP.Targets)
+	}
+	t.Setenv("IVAN_HTTP_LISTEN", "127.0.0.1:1234")
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if cfg2.HTTP.Listen != "127.0.0.1:1234" {
+		t.Fatalf("env 未覆盖 listen: %q", cfg2.HTTP.Listen)
+	}
+
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("data_dir: "+dir+"\nhttp:\n  targets:\n    - {name: main}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("targets 缺 channel 应拒绝启动")
+	}
+}
+
 func TestMaxRetriesDefaultAndEnv(t *testing.T) {
 	if got := Default().MaxRetries; got != DefaultMaxRetries {
 		t.Fatalf("默认重试次数应为 %d: %d", DefaultMaxRetries, got)

@@ -35,6 +35,7 @@ const (
 	OpJobsList   = "jobs/list"
 	OpJobsRemove = "jobs/remove"
 	OpJobsRun    = "jobs/run"
+	OpNotify     = "notify"
 	OpPause      = "pause"
 	OpCancel     = "cancel"
 	OpResume     = "resume"

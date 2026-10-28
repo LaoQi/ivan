@@ -42,6 +42,11 @@ const (
 	DefaultStreamFirstSeconds = 3
 	DefaultStreamEverySeconds = 1
 	DefaultStreamMaxChars     = 2048
+	DefaultHTTPListen         = "127.0.0.1:8787"
+	DefaultHTTPMaxBody        = 65536
+	DefaultHTTPDedupeSeconds  = 600
+	DefaultHTTPNotifyPerMin   = 30
+	DefaultHTTPRequestPerMin  = 5
 )
 
 type RunnerConfig struct {
@@ -91,6 +96,27 @@ type QQConfig struct {
 	ReconnectMaxSec int      `yaml:"reconnect_max_sec"`
 }
 
+type HTTPTargetConfig struct {
+	Name    string `yaml:"name"`
+	Channel string `yaml:"channel"`
+	ChatID  string `yaml:"chat_id"`
+}
+
+type HTTPRequestConfig struct {
+	Session string `yaml:"session"`
+}
+
+type HTTPConfig struct {
+	Enabled          bool               `yaml:"enabled"`
+	Listen           string             `yaml:"listen"`
+	MaxBodyBytes     int                `yaml:"max_body_bytes"`
+	DedupeSeconds    int                `yaml:"dedupe_seconds"`
+	NotifyPerMinute  int                `yaml:"notify_per_minute"`
+	RequestPerMinute int                `yaml:"request_per_minute"`
+	Targets          []HTTPTargetConfig `yaml:"targets"`
+	Request          HTTPRequestConfig  `yaml:"request"`
+}
+
 type ChannelsConfig struct {
 	CLI CLIConfig `yaml:"cli"`
 	QQ  QQConfig  `yaml:"qq"`
@@ -109,6 +135,7 @@ type Config struct {
 	Daemon        DaemonConfig   `yaml:"daemon"`
 	Channels      ChannelsConfig `yaml:"channels"`
 	Schedule      ScheduleConfig `yaml:"schedule"`
+	HTTP          HTTPConfig     `yaml:"http"`
 	GlobalAgents  string         `yaml:"global_agents"`
 	ImageMaxBytes int            `yaml:"image_max_bytes"`
 	ImageResize   bool           `yaml:"image_resize"`
@@ -168,6 +195,14 @@ func Default() *Config {
 			MissedPolicy:      "run",
 			JobTimeoutSeconds: DefaultJobTimeoutSeconds,
 		},
+		HTTP: HTTPConfig{
+			Enabled:          true,
+			Listen:           DefaultHTTPListen,
+			MaxBodyBytes:     DefaultHTTPMaxBody,
+			DedupeSeconds:    DefaultHTTPDedupeSeconds,
+			NotifyPerMinute:  DefaultHTTPNotifyPerMin,
+			RequestPerMinute: DefaultHTTPRequestPerMin,
+		},
 		GlobalAgents:  filepath.Join(home, filepath.FromSlash(GlobalAgentsSuffix)),
 		ImageMaxBytes: agent.DefaultImageMaxBytes,
 		ImageResize:   true,
@@ -204,6 +239,9 @@ func Load(path string) (*Config, error) {
 		borrowTanya(cfg)
 	}
 	cfg.normalize()
+	if err := cfg.ValidateHTTP(); err != nil {
+		return nil, err
+	}
 	if cfg.Runner.HandoffForceTokens <= cfg.Runner.HandoffHintTokens {
 		return nil, fmt.Errorf("handoff_force_tokens(%d) 必须大于 handoff_hint_tokens(%d)",
 			cfg.Runner.HandoffForceTokens, cfg.Runner.HandoffHintTokens)
@@ -231,6 +269,7 @@ func applyEnv(cfg *Config) {
 		}
 	}
 	set("SOCKET", &cfg.Daemon.Socket)
+	set("HTTP_LISTEN", &cfg.HTTP.Listen)
 	set("QQ_APP_ID", &cfg.Channels.QQ.AppID)
 	set("QQ_APP_SECRET", &cfg.Channels.QQ.AppSecret)
 }
@@ -302,6 +341,43 @@ func (c *Config) normalize() {
 	if c.Schedule.JobTimeoutSeconds <= 0 {
 		c.Schedule.JobTimeoutSeconds = DefaultJobTimeoutSeconds
 	}
+	if strings.TrimSpace(c.HTTP.Listen) == "" {
+		c.HTTP.Listen = DefaultHTTPListen
+	}
+	if c.HTTP.MaxBodyBytes <= 0 {
+		c.HTTP.MaxBodyBytes = DefaultHTTPMaxBody
+	}
+	if c.HTTP.DedupeSeconds < 0 {
+		c.HTTP.DedupeSeconds = DefaultHTTPDedupeSeconds
+	}
+	if c.HTTP.NotifyPerMinute < 0 {
+		c.HTTP.NotifyPerMinute = DefaultHTTPNotifyPerMin
+	}
+	if c.HTTP.RequestPerMinute < 0 {
+		c.HTTP.RequestPerMinute = DefaultHTTPRequestPerMin
+	}
+	for i := range c.HTTP.Targets {
+		c.HTTP.Targets[i].Name = strings.TrimSpace(c.HTTP.Targets[i].Name)
+		c.HTTP.Targets[i].Channel = strings.TrimSpace(c.HTTP.Targets[i].Channel)
+		c.HTTP.Targets[i].ChatID = strings.TrimSpace(c.HTTP.Targets[i].ChatID)
+	}
+}
+
+func (c *Config) ValidateHTTP() error {
+	seen := map[string]bool{}
+	for i, t := range c.HTTP.Targets {
+		if t.Name == "" {
+			return fmt.Errorf("http.targets[%d] 缺少 name", i)
+		}
+		if t.Channel == "" {
+			return fmt.Errorf("http.targets[%d] %s 缺少 channel", i, t.Name)
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("http.targets 名称重复: %s", t.Name)
+		}
+		seen[t.Name] = true
+	}
+	return nil
 }
 
 func (c *Config) SocketPath() string {
@@ -326,6 +402,8 @@ func (c *Config) LogPath() string { return filepath.Join(c.DataDir, "logs", "iva
 func (c *Config) AgentsDir() string { return filepath.Join(c.DataDir, "agents") }
 
 func (c *Config) AgentDir(slug string) string { return filepath.Join(c.AgentsDir(), slug) }
+
+func (c *Config) HTTPEnabled() bool { return c.HTTP.Enabled }
 
 func (c *Config) SendTimeout() time.Duration {
 	return time.Duration(c.Daemon.SendTimeoutSeconds) * time.Second

@@ -37,8 +37,8 @@ ivan 是常驻的极简 agent：**特化在定时触发与计划任务**，全�
 ## 4 总体架构
 
 ```
-Channel 层    qq / cli /（后置）webhook —— 外部端点
-Trigger 层    schedule /（后置）heartbeat —— 产出 inbound 消息
+Channel 层    qq / cli —— 外部端点
+Trigger 层    schedule / http（外部入口：通知转发 + agent 请求）/（后置）heartbeat —— 产出 inbound 消息或直投出站
 Sink 层       events jsonl + 人类可读日志 —— 只出
    ↕  MessageBus（inbound / outbound 两条流，带缓冲、非阻塞投递）
 Runner 层     会话键 → agent 实例；入站消息 → 回合；事件 → 出站消息 / 事件日志
@@ -46,7 +46,7 @@ Runner 层     会话键 → agent 实例；入站消息 → 回合；事件 →
 Core 层       tanya 的 agent（LLM/回合/工具/会话/交接）+ ivan 特化工具
 ```
 
-一切输入都是 inbound 消息：QQ 用户消息、CLI 命令、定时作业触发、（后置）webhook 与心跳。区别只在来源字段，之后走同一条路径：会话键路由 → agent 回合 → 出站消息按配置 fan-out 回目标通道。"IM 只是一个 channel"即由此落地。
+一切输入都是 inbound 消息：QQ 用户消息、CLI 命令、定时作业触发、外部服务的 HTTP 请求（`/request`）、（后置）心跳；外部通知（`/notify`）只出站、不经总线。区别只在来源字段，之后走同一条路径：会话键路由 → agent 回合 → 出站消息按配置 fan-out 回目标通道。"IM 只是一个 channel"即由此落地。
 
 事件流（`agent.Event`）在 runner 侧被消费：文本增量聚合为出站消息，工具/回合事件落事件日志，回合结束触发通知。
 
@@ -121,7 +121,8 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | D4 | 首期消息形态 | 仅文本 + 图片 |
 | D5 | 定时表达式 | **修订（2026-10-21）**：`at`/`every`/`daily`（每天固定时刻 + 时区）已做，`daily` 覆盖"每日定时汇报/提醒"的实际需求；**完整 cron 表达式不做**（`expr` 字段保留但 `Validate` 报错），将来要"每周/每月"时按需扩展 `daily` 的周期维度，不引通用解析器 |
 | D6 | 与核心库关系 | 共用 `battlelab` 的 `agent`/`tools`/`ctty`（2026-10-22 从 tanya 抽出），库改动与调用方 CHANGELOG 同步；公共模块后续按 §5 判据抽库 |
-| D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；webhook、心跳为后置可选 |
+| D7 | 触发入口 | QQ 入站、计划任务、本地 CLI/socket 为必做；**修订（2026-10-23/24）**：HTTP 外部入口已做，拆成两个端点——`/notify` 纯转发通知（fan-out `http.targets`，不经总线、不计 token）与 `/request` 与 agent 沟通（**异步**：受理即返回会话键 `http:<source>`，结果经 `GET /request?session=` 轮询 runner 结果表，无回执管道），**不做模式开关**；心跳仍后置可选 |
+| D11 | 外部入口的分层与目标权限 | 归 **Trigger 层**而非 `Channel` 层（`Channel` 只拿得到 Bus，出站拿不到投递错误，而通知必须能回执）；出站尽力而为广播、目标只由配置决定（请求体不得指定 channel/chat_id/route，`send_message` 也只广播全部 `http.targets`、不指定出口）；当前不做鉴权（仅内网，默认监听 `127.0.0.1`），不预留半成品字段 |
 | D8 | 作业存储 | **存储抽象接口 + sqlite 实现**（`modernc.org/sqlite`，纯 Go 无 cgo）：文件级重写不够可靠，作业状态需要事务与并发安全；接口保持窄（List/Get/Put/Delete/Close），换实现不动调度器 |
 | D9 | 预算与暂停口径 | 预算**只在 runner 一处**统计（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日量落 `state.json`），调度器通过 `Budget` 回调复用，不再自带计数器；`paused` 只挡无人值守路径（定时触发、自动续跑、阈值交接提示），用户消息照常处理 |
 | D10 | 全局说明（AGENTS.md） | **机制保留、位置隔离**：库侧 `agent` 在 system prompt 末尾拼"全局说明 + 项目说明"，**默认不读任何全局文件**；ivan 经 `agent.WithGlobalAgentsPath` 读自己的 `~/.config/ivan/AGENTS.md`（`global_agents` 可改路径，`off` 禁用），避免 tanya 的偏好串入无人值守代理；项目说明仍读会话工作区下的 `AGENTS.md` |
@@ -143,6 +144,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 - `docs/qq-bot.md` QQ 官方机器人协议设计、实现分层与抽库路径
 - `docs/schedule.md` 定时与计划任务设计与 P3 实现记录（§8）
 - `docs/sessions.md` 会话模型、agent 实例池与推进策略
+- `docs/notify.md` 外部入口（`/notify` 与 `/request`、`send_message`、`ivan notify`）
 - `docs/refs-picoclaw.md` 参考调研快照与取舍
 - 根 `AGENTS.md` 现行约束与结构；`CHANGELOG.md` 变更记录
 

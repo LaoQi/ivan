@@ -8,8 +8,8 @@
 
 | 概念 | 含义 | 本期实现 |
 |---|---|---|
-| `Channel` | 能收能发的**外部端点** | `qq`、`cli`、`webhook`（后置） |
-| `Trigger` | 内部**触发源**，只产出 inbound 消息 | `schedule`、`heartbeat`（后置） |
+| `Channel` | 能收能发的**外部端点** | `qq`、`cli` |
+| `Trigger` | 内部**触发源**，产出 inbound 消息或直投出站 | `schedule`、`http`（外部入口，见 `docs/notify.md`）、`heartbeat`（后置） |
 | `Sink` | 只出的**观测出口** | 事件 jsonl、人类可读日志 |
 
 原则：
@@ -112,9 +112,9 @@ socket 协议：**JSON Lines**，一行一帧（单帧上限 1 MiB），字段 `
 
 调度器产生的消息以 `Channel: "schedule"` 标记来源，`ChatID`/`SessionKey` 指向目标会话，`ReplyChannel` 记真实回投通道（P3 起）。**它不经 Bus**：`runner.TriggerJob` 同步执行，出站按 `ReplyChannel` 直投 `Manager.Route` 以便拿到投递错误（见 `docs/schedule.md` §8.1）。心跳（后置）同构，只是触发者是无人在场时的定时自省。
 
-### webhook（后置）
+### http（外部入口，已实现，见 `docs/notify.md`）
 
-本地 HTTP 端口收事件，`Channel: "webhook"`，入站可带签名校验；出站需要在配置里声明其可回投的目标通道。
+**归 Trigger 层而非 `Channel` 层**：`Channel` 接口只拿得到 `Bus`，出站只能 `bus.Post`（丢弃不可知、拿不到投递错误），而通知入口必须能给调用方回执——这与 `schedule` 直投 `Manager.Route` 同构。一个监听两个端点：`POST /notify` 纯转发通知（fan-out `http.targets`，不经总线、不计 token、逐目标回执）、`POST /request` 与 agent 沟通（`Bus.Publish` 受理即返回会话键，结果经 `GET /request?session=` 轮询 runner 结果表，无回执管道，会话键默认 `http:<source>`）、`GET /healthz`。出站尽力而为广播：`send_message` 广播全部 `http.targets`，不指定出口。
 
 ## 6 长消息与出站规则
 

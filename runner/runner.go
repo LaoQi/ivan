@@ -20,14 +20,15 @@ import (
 )
 
 type Options struct {
-	Cfg    *config.Config
-	Log    *data.EventLog
-	Human  *chlog.Sink
-	State  *data.State
-	Bus    *bus.Bus
-	Stream io.Writer
-	Notify func(ctx context.Context, msg bus.OutboundMessage) error
-	Paused func() bool
+	Cfg          *config.Config
+	Log          *data.EventLog
+	Human        *chlog.Sink
+	State        *data.State
+	Bus          *bus.Bus
+	Stream       io.Writer
+	Notify       func(ctx context.Context, msg bus.OutboundMessage) error
+	NotifyStrict func(ctx context.Context, msg bus.OutboundMessage) error
+	Paused       func() bool
 }
 
 type Turn struct {
@@ -67,6 +68,9 @@ type Runner struct {
 
 	pendingMu sync.Mutex
 	pending   map[string]string
+
+	outMu    sync.Mutex
+	outcomes map[string]TurnOutcome
 }
 
 type AgentStatus struct {
@@ -117,6 +121,7 @@ func New(opts Options) (*Runner, error) {
 		cfg:       opts.Cfg,
 		opts:      opts,
 		pool:      map[string]*instance{},
+		outcomes:  map[string]TurnOutcome{},
 		sem:       make(chan struct{}, opts.Cfg.Daemon.MaxConcurrent),
 		startedAt: time.Now(),
 	}
@@ -182,6 +187,7 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 	if ag := inst.ag; ag != nil {
 		turn.Session = ag.SessionID()
 	}
+	r.setOutcome(key, TurnOutcome{Failed: err != nil, Reply: out.Content, FinishedAt: time.Now()})
 	if s := t.stream; s != nil {
 		turn.NotifyError = briefErr(s.finish(out))
 		return turn, err
@@ -210,6 +216,34 @@ func (r *Runner) deliver(ctx context.Context, msg bus.OutboundMessage) string {
 		return briefErr(err)
 	}
 	return ""
+}
+
+type TurnOutcome struct {
+	Failed     bool
+	Reply      string
+	FinishedAt time.Time
+}
+
+func (r *Runner) setOutcome(key string, o TurnOutcome) {
+	r.outMu.Lock()
+	defer r.outMu.Unlock()
+	r.outcomes[key] = o
+}
+
+func (r *Runner) SessionState(key string) (running bool, o TurnOutcome, known bool) {
+	r.poolMu.Lock()
+	inst := r.pool[key]
+	r.poolMu.Unlock()
+	if inst != nil {
+		if !inst.mu.TryLock() {
+			return true, TurnOutcome{}, true
+		}
+		inst.mu.Unlock()
+	}
+	r.outMu.Lock()
+	o, known = r.outcomes[key]
+	r.outMu.Unlock()
+	return false, o, known
 }
 
 func (r *Runner) CancelTurn(key string) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -357,6 +358,87 @@ func loadJobsOffline(cfg *config.Config) ([]schedule.Job, error) {
 	return store.List()
 }
 
+func cmdNotify(args []string) int {
+	f, err := parseArgs(args, "json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	cfg, code := loadConfig()
+	if cfg == nil {
+		return code
+	}
+	text := strings.TrimSpace(strings.Join(f.rest, " "))
+	if text == "" && !ctty.IsTerminal(int(os.Stdin.Fd())) {
+		if b, rerr := io.ReadAll(os.Stdin); rerr == nil {
+			text = strings.TrimSpace(string(b))
+		}
+	}
+	if text == "" {
+		fmt.Fprintln(os.Stderr, "用法: ivan notify [--title=标题] [--severity=级别] [--source=来源] [--dedupe-key=键] \"正文\"")
+		return 1
+	}
+	payload, err := json.Marshal(map[string]string{
+		"title":      f.values["title"],
+		"body":       text,
+		"severity":   f.values["severity"],
+		"source":     firstNonEmpty(f.values["source"], "cli"),
+		"dedupe_key": f.values["dedupe-key"],
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	raw, err := cli.Call(cfg.SocketPath(), cli.OpNotify, string(payload), cfg.SendTimeout())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	if f.bools["json"] {
+		fmt.Println(string(raw))
+		return 0
+	}
+	var res struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Targets []struct {
+			Name   string `json:"name"`
+			Result string `json:"result"`
+			Error  string `json:"error"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		fmt.Println(string(raw))
+		return 0
+	}
+	status := firstNonEmpty(res.Status, "ok")
+	if res.Message != "" {
+		fmt.Printf("%s：%s\n", status, res.Message)
+	} else {
+		fmt.Println(status)
+	}
+	for _, t := range res.Targets {
+		line := fmt.Sprintf("  %s: %s", t.Name, t.Result)
+		if t.Error != "" {
+			line += "（" + t.Error + "）"
+		}
+		fmt.Println(line)
+	}
+	if status == "failed" {
+		return 1
+	}
+	return 0
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func cmdJobs(args []string) int {
 	f, err := parseArgs(args, "json")
 	if err != nil {
@@ -626,6 +708,16 @@ func printStatus(st daemon.Status) {
 		}
 		if st.QQ.LastError != "" {
 			line += fmt.Sprintf(" last_error=%q", st.QQ.LastError)
+		}
+		fmt.Println(line)
+	}
+	if st.HTTP != nil {
+		h := st.HTTP
+		line := fmt.Sprintf("http      listen=%s running=%v targets=%d notify=%d delivered=%d partial=%d failed=%d deduped=%d rejected=%d",
+			h.Listen, h.Running, h.Targets, h.NotifyAccepted, h.NotifyDelivered, h.NotifyPartial, h.NotifyFailed, h.NotifyDeduped, h.NotifyRejected)
+		line += fmt.Sprintf(" | request=%d rejected=%d", h.RequestAccepted, h.RequestRejected)
+		if h.LastError != "" {
+			line += fmt.Sprintf(" last_error=%q", h.LastError)
 		}
 		fmt.Println(line)
 	}

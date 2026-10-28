@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LaoQi/ivan/channel"
 	"github.com/LaoQi/ivan/channel/cli"
 	"github.com/LaoQi/ivan/config"
 	"github.com/LaoQi/ivan/data"
@@ -33,6 +34,7 @@ func testConfig(t *testing.T, srv *fakellm.Server) *config.Config {
 	cfg.SessionMode = "global"
 	cfg.Daemon.ShutdownTimeoutSeconds = 3
 	cfg.Runner.Stream = false
+	cfg.HTTP.Listen = "127.0.0.1:0"
 	return cfg
 }
 
@@ -109,11 +111,20 @@ func TestSendStatusRestartResume(t *testing.T) {
 		t.Fatalf("status 异常: %+v", st)
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for st.Channels[0].Sent == 0 && time.Now().Before(deadline) {
+	var cliStat *channel.Status
+	for time.Now().Before(deadline) {
+		for i := range st.Channels {
+			if st.Channels[i].Name == "cli" {
+				cliStat = &st.Channels[i]
+			}
+		}
+		if cliStat != nil && cliStat.Sent > 0 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 		st = fetchStatus(t, cfg)
 	}
-	if len(st.Channels) != 1 || st.Channels[0].Name != "cli" || st.Channels[0].Sent != 1 {
+	if cliStat == nil || cliStat.Sent != 1 {
 		t.Fatalf("通道状态异常: %+v", st.Channels)
 	}
 	if st.Runner.Turns != 1 || st.Runner.Agents != 1 || st.Bus.Inbound != 1 || st.Bus.Outbound != 1 {
