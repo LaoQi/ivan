@@ -468,7 +468,7 @@ func (d *Daemon) broadcastNotice(ctx context.Context, content string) []httpchan
 		}
 	}
 	if len(out) == 0 {
-		out = append(out, httpchan.TargetResult{Name: "-", Result: "no_targets", Error: "没有实现通知出口的通道"})
+		out = append(out, httpchan.TargetResult{Name: "-", Channel: "-", Result: "no_targets", Error: "没有实现通知出口的通道"})
 	}
 	return out
 }
