@@ -29,26 +29,25 @@
 请求体（`source` 必填；`title` 与 `body` 至少一项非空）：
 
 ```json
-{"source":"ci","severity":"error","title":"构建失败","body":"job #123 exit 1","dedupe_key":"build-123"}
+{"source":"ci","title":"构建失败","body":"job #123 exit 1"}
 ```
 
-- `severity`：`info`（默认，无前缀）；其他值渲染为 `[<severity>] 标题`
 - `source`（来源服务名，必填）正文末尾追加 `— <source>` 脚注
 - 长度按字符计：`title` ≤ 200、`body` ≤ 8192，超出截断并回执 `truncated: true`
-- `dedupe_key`：`source|dedupe_key` 去重窗口（默认 600s）内重复投递返回 `deduped`，不重复发送
 - `body` 缺省时可写 `text`（`body` 优先）
 
 回执：
 
 ```json
-{"status":"delivered","deduped":false,"truncated":false,
+{"status":"delivered","truncated":false,
  "targets":[{"name":"…","channel":"…","result":"sent"}]}
 ```
 
-- `status` 取值：`delivered`（全部送达）/ `partial`（部分送达，均 200）/ `failed`（未送达，503）/ `deduped`（去重命中，未重复发送）
+- `status` 取值：`delivered`（全部送达）/ `partial`（部分送达，均 200）/ `failed`（未送达，503）
 - `targets[].result` 取值：`sent`（已发）/ `failed`（发送失败，`error` 给原因）/ `no_targets`（当前没有可投递的收件人）
 - **怎么处理**：`delivered`/`partial` 视为已送达，无需动作；`failed` 可退避重试；`no_targets` 重试无效，不要重试
 - 超过限额（默认 30 次/分钟）429；缺 `source` 400
+- 不做去重与分级：同样的内容重复提交就会重复投递，需要防重复请在调用侧自行控制
 - 批量通知请自行聚合后发送，不要把 `/notify` 当日志管道
 
 ## POST /request

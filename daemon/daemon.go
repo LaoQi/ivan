@@ -158,7 +158,6 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			Listen:           cfg.HTTP.Listen,
 			Version:          d.version,
 			MaxBodyBytes:     cfg.HTTP.MaxBodyBytes,
-			DedupeSeconds:    cfg.HTTP.DedupeSeconds,
 			NotifyPerMinute:  cfg.HTTP.NotifyPerMinute,
 			RequestPerMinute: cfg.HTTP.RequestPerMinute,
 			RequestSession:   cfg.HTTP.Request.Session,

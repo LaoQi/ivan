@@ -44,7 +44,6 @@ const (
 	DefaultStreamMaxChars     = 2048
 	DefaultHTTPListen         = "127.0.0.1:8787"
 	DefaultHTTPMaxBody        = 65536
-	DefaultHTTPDedupeSeconds  = 600
 	DefaultHTTPNotifyPerMin   = 30
 	DefaultHTTPRequestPerMin  = 5
 )
@@ -104,7 +103,6 @@ type HTTPConfig struct {
 	Enabled          bool              `yaml:"enabled"`
 	Listen           string            `yaml:"listen"`
 	MaxBodyBytes     int               `yaml:"max_body_bytes"`
-	DedupeSeconds    int               `yaml:"dedupe_seconds"`
 	NotifyPerMinute  int               `yaml:"notify_per_minute"`
 	RequestPerMinute int               `yaml:"request_per_minute"`
 	Request          HTTPRequestConfig `yaml:"request"`
@@ -192,7 +190,6 @@ func Default() *Config {
 			Enabled:          true,
 			Listen:           DefaultHTTPListen,
 			MaxBodyBytes:     DefaultHTTPMaxBody,
-			DedupeSeconds:    DefaultHTTPDedupeSeconds,
 			NotifyPerMinute:  DefaultHTTPNotifyPerMin,
 			RequestPerMinute: DefaultHTTPRequestPerMin,
 		},
@@ -336,9 +333,6 @@ func (c *Config) normalize() {
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		c.HTTP.MaxBodyBytes = DefaultHTTPMaxBody
-	}
-	if c.HTTP.DedupeSeconds < 0 {
-		c.HTTP.DedupeSeconds = DefaultHTTPDedupeSeconds
 	}
 	if c.HTTP.NotifyPerMinute < 0 {
 		c.HTTP.NotifyPerMinute = DefaultHTTPNotifyPerMin

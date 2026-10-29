@@ -43,7 +43,6 @@ type Config struct {
 	Listen           string
 	Version          string
 	MaxBodyBytes     int
-	DedupeSeconds    int
 	NotifyPerMinute  int
 	RequestPerMinute int
 	RequestSession   string
@@ -68,7 +67,6 @@ type Stats struct {
 	NotifyDelivered uint64    `json:"notify_delivered"`
 	NotifyPartial   uint64    `json:"notify_partial"`
 	NotifyFailed    uint64    `json:"notify_failed"`
-	NotifyDeduped   uint64    `json:"notify_deduped"`
 	NotifyTruncated uint64    `json:"notify_truncated"`
 	NotifyRejected  uint64    `json:"notify_rejected"`
 	RequestAccepted uint64    `json:"request_accepted"`
@@ -100,33 +98,6 @@ func (w *window) allow(limit int, now time.Time) bool {
 	return true
 }
 
-type dedupe struct {
-	mu  sync.Mutex
-	ttl time.Duration
-	m   map[string]time.Time
-}
-
-func (d *dedupe) seen(key string, now time.Time) bool {
-	if d.ttl <= 0 || key == "" {
-		return false
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.m == nil {
-		d.m = map[string]time.Time{}
-	}
-	for k, t := range d.m {
-		if now.Sub(t) > d.ttl {
-			delete(d.m, k)
-		}
-	}
-	if t, ok := d.m[key]; ok && now.Sub(t) <= d.ttl {
-		return true
-	}
-	d.m[key] = now
-	return false
-}
-
 type Channel struct {
 	cfg Config
 
@@ -137,13 +108,11 @@ type Channel struct {
 	closed     bool
 	notifyWin  window
 	requestWin window
-	dedup      dedupe
 
 	notifyAccepted  atomic.Uint64
 	notifyDelivered atomic.Uint64
 	notifyPartial   atomic.Uint64
 	notifyFailed    atomic.Uint64
-	notifyDeduped   atomic.Uint64
 	notifyTruncated atomic.Uint64
 	notifyRejected  atomic.Uint64
 
@@ -160,8 +129,7 @@ func New(cfg Config) *Channel {
 		cfg.MaxBodyBytes = 65536
 	}
 	return &Channel{
-		cfg:   cfg,
-		dedup: dedupe{ttl: time.Duration(cfg.DedupeSeconds) * time.Second},
+		cfg: cfg,
 	}
 }
 
@@ -250,7 +218,6 @@ func (c *Channel) Stats() Stats {
 		NotifyDelivered: c.notifyDelivered.Load(),
 		NotifyPartial:   c.notifyPartial.Load(),
 		NotifyFailed:    c.notifyFailed.Load(),
-		NotifyDeduped:   c.notifyDeduped.Load(),
 		NotifyTruncated: c.notifyTruncated.Load(),
 		NotifyRejected:  c.notifyRejected.Load(),
 		RequestAccepted: c.requestAccepted.Load(),

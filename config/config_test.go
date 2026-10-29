@@ -240,7 +240,7 @@ func TestHTTPDefaultsAndValidation(t *testing.T) {
 		t.Fatal("HTTP 入口应默认开启")
 	}
 	if cfg.HTTP.Listen != DefaultHTTPListen || cfg.HTTP.MaxBodyBytes != DefaultHTTPMaxBody ||
-		cfg.HTTP.DedupeSeconds != DefaultHTTPDedupeSeconds || cfg.HTTP.NotifyPerMinute != DefaultHTTPNotifyPerMin ||
+		cfg.HTTP.NotifyPerMinute != DefaultHTTPNotifyPerMin ||
 		cfg.HTTP.RequestPerMinute != DefaultHTTPRequestPerMin {
 		t.Fatalf("http 默认值异常: %+v", cfg.HTTP)
 	}

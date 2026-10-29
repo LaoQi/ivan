@@ -246,7 +246,7 @@ func TestNotifyControlOp(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	payload := `{"title":"磁盘告警","body":"根分区 92%","severity":"warn","source":"node-exporter"}`
+	payload := `{"title":"磁盘告警","body":"根分区 92%","source":"node-exporter"}`
 	raw, err := cli.Call(cfg.SocketPath(), cli.OpNotify, payload, 5*time.Second)
 	if err != nil {
 		t.Fatalf("notify op: %v", err)

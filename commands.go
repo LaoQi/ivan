@@ -375,15 +375,13 @@ func cmdNotify(args []string) int {
 		}
 	}
 	if text == "" {
-		fmt.Fprintln(os.Stderr, "用法: ivan notify [--title=标题] [--severity=级别] [--source=来源] [--dedupe-key=键] \"正文\"")
+		fmt.Fprintln(os.Stderr, "用法: ivan notify [--title=标题] [--source=来源] \"正文\"")
 		return 1
 	}
 	payload, err := json.Marshal(map[string]string{
-		"title":      f.values["title"],
-		"body":       text,
-		"severity":   f.values["severity"],
-		"source":     firstNonEmpty(f.values["source"], "cli"),
-		"dedupe_key": f.values["dedupe-key"],
+		"title":  f.values["title"],
+		"body":   text,
+		"source": firstNonEmpty(f.values["source"], "cli"),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -713,8 +711,8 @@ func printStatus(st daemon.Status) {
 	}
 	if st.HTTP != nil {
 		h := st.HTTP
-		line := fmt.Sprintf("http      listen=%s running=%v notify=%d delivered=%d partial=%d failed=%d deduped=%d rejected=%d",
-			h.Listen, h.Running, h.NotifyAccepted, h.NotifyDelivered, h.NotifyPartial, h.NotifyFailed, h.NotifyDeduped, h.NotifyRejected)
+		line := fmt.Sprintf("http      listen=%s running=%v notify=%d delivered=%d partial=%d failed=%d rejected=%d",
+			h.Listen, h.Running, h.NotifyAccepted, h.NotifyDelivered, h.NotifyPartial, h.NotifyFailed, h.NotifyRejected)
 		line += fmt.Sprintf(" | request=%d rejected=%d", h.RequestAccepted, h.RequestRejected)
 		if h.LastError != "" {
 			line += fmt.Sprintf(" last_error=%q", h.LastError)

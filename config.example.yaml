@@ -86,15 +86,13 @@ schedule:
 # 外部入口（HTTP；见 docs/notify.md）
 http:
   # 是否启用 HTTP 入口（两个端点：/notify 纯转发通知、/request 与 agent 沟通）
-  # 默认开启；通知出口由各通道的 Noticer 能力自决（当前通道都未实现时 /notify 明确报错）
+  # 默认开启；通知目标由各通道自决（见 channels.qq 的认领说明），无目标时 /notify 明确回报 no_targets
   enabled: true
   # 监听地址；仅内网使用，当前不做鉴权，切勿暴露公网
   listen: 127.0.0.1:8787
   # 请求体上限（字节）
   max_body_bytes: 65536
-  # 去重窗口（秒，按 source|dedupe_key；0 = 关闭去重）
-  dedupe_seconds: 600
-  # 两个端点各自的每分钟请求上限（0 = 不限）
+  # 两个端点各自的每分钟请求上限（0 = 不限）；这是内部流控，对外不做去重/分级
   notify_per_minute: 30
   request_per_minute: 5
   # /request 为异步：提交即返回会话键，结果用 GET /request?session=<会话键> 轮询

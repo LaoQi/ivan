@@ -65,7 +65,6 @@ func newTestChannel(t *testing.T, rec *recorder, submit func(bus.InboundMessage)
 	c := New(Config{
 		Listen:           "127.0.0.1:0",
 		MaxBodyBytes:     65536,
-		DedupeSeconds:    60,
 		NotifyPerMinute:  30,
 		RequestPerMinute: 5,
 		Broadcast:        rec.broadcast,
@@ -123,7 +122,7 @@ func TestNotifyBroadcast(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
 	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{
-		"title": "构建失败", "body": "job #123 exit 1", "severity": "error", "source": "ci",
+		"title": "构建失败", "body": "job #123 exit 1", "source": "ci",
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d, body=%v", resp.StatusCode, out)
@@ -139,7 +138,7 @@ func TestNotifyBroadcast(t *testing.T) {
 	if len(contents) != 1 {
 		t.Fatalf("广播次数 = %d, want 1", len(contents))
 	}
-	if !strings.Contains(contents[0], "[error] 构建失败") || !strings.Contains(contents[0], "job #123 exit 1") {
+	if !strings.Contains(contents[0], "构建失败") || !strings.Contains(contents[0], "job #123 exit 1") {
 		t.Fatalf("正文格式不对: %q", contents[0])
 	}
 	if !strings.Contains(contents[0], "— ci") {
@@ -199,32 +198,38 @@ func TestNotifyPlainTextAndEmpty(t *testing.T) {
 	}
 }
 
-func TestNotifyDedupe(t *testing.T) {
+// 对外不做去重：同样内容重复请求就重复投递（去重曾是 dedupe_key 契约，已按用户口径移除）。
+func TestNotifyNoDedupe(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
-	payload := map[string]string{"body": "重复告警", "source": "ci", "dedupe_key": "job-1"}
-	_, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), payload)
-	if out["status"] != "delivered" {
-		t.Fatalf("首次应投递: %v", out)
+	payload := map[string]string{"body": "重复告警", "source": "ci"}
+	for i := 0; i < 2; i++ {
+		_, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), payload)
+		if out["status"] != "delivered" {
+			t.Fatalf("第 %d 次应投递: %v", i+1, out)
+		}
 	}
-	_, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), payload)
-	if out["status"] != "deduped" {
-		t.Fatalf("重复应去重: %v", out)
+	if n := len(rec.contents()); n != 2 {
+		t.Fatalf("不做去重，应投递两次, 实际 %d", n)
 	}
-	if n := len(rec.contents()); n != 1 {
-		t.Fatalf("去重后不应再投递, 投递数 = %d", n)
+}
+
+// 老调用方可能仍在传已移除的字段：应被忽略而不是报错（字段删除不该打断上游）。
+func TestNotifyIgnoresRemovedFields(t *testing.T) {
+	rec := &recorder{}
+	c := newTestChannel(t, rec, nil)
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{
+		"title": "t", "body": "b", "source": "ci",
+		"severity": "error", "dedupe_key": "k",
+	})
+	if resp.StatusCode != http.StatusOK || out["status"] != "delivered" {
+		t.Fatalf("旧字段应被忽略: %d %v", resp.StatusCode, out)
 	}
-	// 不同 source 的同名 key 不算重复
-	payload["source"] = "other"
-	_, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), payload)
-	if out["status"] != "delivered" {
-		t.Fatalf("不同 source 不应去重: %v", out)
+	if _, ok := out["deduped"]; ok {
+		t.Fatalf("回执不应再有 deduped 字段: %v", out)
 	}
-	// 无 key 不去重
-	_, out = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key", "source": "ci"})
-	_, out2 := doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "no key", "source": "ci"})
-	if out["status"] != "delivered" || out2["status"] != "delivered" {
-		t.Fatalf("无 dedupe_key 不应去重: %v %v", out, out2)
+	if got := rec.contents(); len(got) != 1 || strings.Contains(got[0], "[error]") {
+		t.Fatalf("不应再渲染级别前缀: %q", got)
 	}
 }
 
@@ -430,18 +435,23 @@ func TestSendAlwaysUnroutable(t *testing.T) {
 	}
 }
 
-func TestFormatNoticeSeverityAndTitleOnly(t *testing.T) {
-	got, trunc := formatNotice("标题", "", "", "正文")
+func TestFormatNoticeNoSeverityPrefix(t *testing.T) {
+	got, trunc := formatNotice("标题", "", "正文")
 	if trunc || got != "标题\n\n正文" {
-		t.Fatalf("info 不应加前缀: %q", got)
+		t.Fatalf("标题+正文渲染不对: %q", got)
 	}
-	got, _ = formatNotice("", "warn", "", "")
-	if got != "" {
+	if got, _ := formatNotice("", "", ""); got != "" {
 		t.Fatalf("空内容应为空: %q", got)
 	}
-	got, _ = formatNotice("t", "WARN", "", "")
-	if got != "[WARN] t" {
-		t.Fatalf("severity 前缀不对: %q", got)
+	// 不做分级：正文里不会出现任何 severity 前缀
+	got, _ = formatNotice("t", "", "")
+	if got != "t" {
+		t.Fatalf("不应加任何级别前缀: %q", got)
+	}
+	// 来源以脚注形式追加
+	got, _ = formatNotice("t", "ci", "b")
+	if got != "t\n\nb\n\n— ci" {
+		t.Fatalf("来源脚注不对: %q", got)
 	}
 }
 
@@ -464,10 +474,10 @@ func TestStatsCounters(t *testing.T) {
 	rec := &recorder{}
 	c := newTestChannel(t, rec, nil)
 	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "a", "source": "ci"})
-	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k", "source": "ci"})
-	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "dedupe_key": "k", "source": "ci"})
+	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "source": "ci"})
+	_, _ = doJSON(t, http.MethodPost, c.url(t, PathNotify), map[string]string{"body": "b", "source": "ci"})
 	st := c.Stats()
-	if !st.Running || st.NotifyAccepted != 2 || st.NotifyDelivered != 2 || st.NotifyDeduped != 1 {
+	if !st.Running || st.NotifyAccepted != 3 || st.NotifyDelivered != 3 {
 		t.Fatalf("统计不对: %+v", st)
 	}
 	if !strings.HasPrefix(st.Listen, "127.0.0.1:") || strings.HasSuffix(st.Listen, ":0") {

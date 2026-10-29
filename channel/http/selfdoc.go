@@ -34,7 +34,7 @@ func (c *Channel) handleManifest(w http.ResponseWriter, r *http.Request) {
 		"usage":        "通知（source 必填）: curl -X POST {{base}}/notify -H 'Content-Type: application/json' -d '{\"source\":\"ci\",\"title\":\"构建失败\"}'；agent 请求: POST {{base}}/request 受理，GET {{base}}/request?session=<键> 轮询；接口指南: curl -s {{base}}/guide.md",
 		"endpoints": []map[string]string{
 			{"name": "request", "proto": "http", "url": "{{base}}/request", "note": "POST 提交 agent 任务（source/purpose/text 必填，异步受理返回会话键）；GET ?session= 轮询结果"},
-			{"name": "notify", "proto": "http", "url": "{{base}}/notify", "note": "纯转发通知（source 必填，title/body/severity/dedupe_key），投递目标由 ivan 决定、请求方不指定；逐目标回执 sent/failed/no_targets"},
+			{"name": "notify", "proto": "http", "url": "{{base}}/notify", "note": "纯转发通知（source 必填，title/body 至少一项），投递目标由 ivan 决定、请求方不指定；逐目标回执 sent/failed/no_targets"},
 			{"name": "guide", "proto": "http", "url": "{{base}}/guide.md", "note": "接口指南（Markdown，先读这个）"},
 			{"name": "health", "proto": "http", "url": "{{base}}/healthz", "note": "健康检查（服务目录探活即打这里）"},
 		},

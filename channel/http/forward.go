@@ -11,12 +11,10 @@ import (
 )
 
 type NoticeBody struct {
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	Text      string `json:"text"`
-	Severity  string `json:"severity"`
-	Source    string `json:"source"`
-	DedupeKey string `json:"dedupe_key"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Text   string `json:"text"`
+	Source string `json:"source"`
 }
 
 type TargetResult struct {
@@ -73,16 +71,7 @@ func (c *Channel) notice(ctx context.Context, in NoticeBody) (map[string]any, er
 		c.audit("ext_notify_rejected", "rate_limited source="+bus.OneLine(source, sourceLimit))
 		return map[string]any{"status": "rejected", "message": ErrRateLimited.Error()}, ErrRateLimited
 	}
-	dedupeKey := strings.TrimSpace(in.DedupeKey)
-	if dedupeKey != "" {
-		dedupeKey = source + "|" + dedupeKey
-	}
-	if c.dedup.seen(dedupeKey, time.Now()) {
-		c.notifyDeduped.Add(1)
-		c.audit("ext_notify_deduped", "source="+bus.OneLine(source, sourceLimit)+" key="+bus.OneLine(dedupeKey, 128))
-		return map[string]any{"status": "deduped", "message": "同一 dedupe_key 已在去重窗口内投递过", "targets": []TargetResult{}}, nil
-	}
-	content, truncated := formatNotice(title, strings.TrimSpace(in.Severity), source, body)
+	content, truncated := formatNotice(title, source, body)
 	if truncated {
 		c.notifyTruncated.Add(1)
 	}
@@ -104,7 +93,7 @@ func (c *Channel) notice(ctx context.Context, in NoticeBody) (map[string]any, er
 	} else if partial {
 		status = "partial"
 	}
-	out := map[string]any{"status": status, "targets": results, "deduped": false, "truncated": truncated}
+	out := map[string]any{"status": status, "targets": results, "truncated": truncated}
 	if status == "failed" {
 		out["message"] = "通知投递全部失败（或没有可投递的通知出口）"
 		return out, errors.New(out["message"].(string))
@@ -149,8 +138,8 @@ func summarizeResults(results []TargetResult) string {
 	return b.String()
 }
 
-// formatNotice 组装投递正文：`[severity] title` + 正文（+ 来源脚注）。
-func formatNotice(title, severity, source, body string) (string, bool) {
+// formatNotice 组装投递正文：标题 + 正文（+ 来源脚注）。不做分级——投递没有分级设计。
+func formatNotice(title, source, body string) (string, bool) {
 	truncated := false
 	if title != "" {
 		if clipped := bus.Truncate(title, titleLimit); clipped != title {
@@ -166,11 +155,6 @@ func formatNotice(title, severity, source, body string) (string, bool) {
 		return "", truncated
 	}
 	var b strings.Builder
-	if sev := strings.TrimSpace(severity); sev != "" && !strings.EqualFold(sev, "info") {
-		b.WriteString("[")
-		b.WriteString(bus.OneLine(sev, 32))
-		b.WriteString("] ")
-	}
 	if title != "" {
 		b.WriteString(title)
 		if body != "" {
