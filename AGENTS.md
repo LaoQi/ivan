@@ -7,7 +7,7 @@
 
 ## 设计约束
 
-- 定位只做三件事：通道、调度、会话；不做 Web UI、多渠道全家桶、语音/视频、skills/MCP、多租户
+- 定位只做三件事：通道、调度、会话；不做 Web UI、多渠道全家桶、语音/视频、skills/MCP、多租户、**subagent（多 agent 会话编排，2026-10-30 明确废弃，见 `docs/plan.md` D12）**；需要并行就用各自独立的会话键，不建父子关系
 - **外部入口**：`channel/http` 一个监听两个业务端点（`/notify` 纯转发通知用户、`/request` 与 agent 沟通）外加描述类只读端点（`/healthz`、`/.well-known/service.json` 自述、`/guide.md` 接口指南），路径即语义、无模式开关；出站一律尽力而为、目标由**通道默认通知出口自决**（`channel.Noticer` 可选能力：`Notice(ctx, content) []NoticeResult`，daemon 遍历实现该能力的通道广播；外部请求体与模型都不得指定目标，也不存在 `http.targets` 之类的目标清单配置）；`/request` 异步：受理即返回会话键（按来源派生 `http:<source>`），结果经 `GET /request?session=` 轮询 runner 结果表，不做回执管道；`send_message` 与 `/notify`、`ivan notify` 走同一广播管线（不指定出口，模型不能给任意账号发消息）；**外部请求起止双向回报**：`/request` 受理即发「准备做什么」（`channel/http` 直接渲染结构化字段，不消耗回合），回合结束发「做得怎么样」（`runner` 仅对 `Channel=http` 的回合回报），两条均 best-effort
 - **QQ 通知目标不可配置、只能认领**：`user_openid` 是随 app 变化的平台标识（开发者后台不可见），因此 `channel/qq` 自持状态文件 `<data_dir>/qq/channel.json`（0600 原子写），首启生成 `claim_token` 并打日志，本人私聊机器人发送该令牌即把该账号写为通知目标、轮换令牌并写回；认领消息不进 agent、受 `allow_from` 约束、允许新账号覆盖。通知走主动消息（无 `msg_id`/`msg_seq`，不受 `allow_proactive` 门禁）+ 通道自切分，正文按语法判定走 markdown（拒收则回退纯文本）；无目标时 `Notice` 返回空 → daemon 如实回执 `no_targets`
 - **通知回执必须如实**：`Manager.Route` 对无目标通道只计 `unmatched` 并返回 nil，通知类直投一律经 daemon 的 `deliverStrict`（前后比对 unmatched 计数，涨了返回 `ErrUnroutable`），否则回执会谎报"已投递"
