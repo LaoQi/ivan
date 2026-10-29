@@ -134,6 +134,7 @@ channels:
     allow_proactive: false
     # 通知目标不在此配置：QQ 通道首启生成认领令牌（日志可见，落 <data_dir>/qq/channel.json），
     # 用本人 QQ 私聊机器人发送该令牌即把该账号设为通知目标，令牌随之轮换并写回该文件
+    # （通知正文与普通出站同规则：含 markdown 语法且 markdown 开启时走 msg_type=2，被拒则回退纯文本）
 
     # 网关重连指数退避上限（秒）
     reconnect_max_sec: 60

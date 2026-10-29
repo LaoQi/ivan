@@ -230,7 +230,7 @@ func (c *Channel) noticeTo(ctx context.Context, openid string, parts []string) e
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		if _, err := c.client.SendText(ctx, target, part, "", 0); err != nil {
+		if err := c.sendBody(ctx, target, part, "", 0); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}

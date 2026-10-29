@@ -103,8 +103,12 @@ func (c *Client) SendMarkdown(ctx context.Context, target Target, markdown strin
 	data := map[string]any{
 		"msg_type": MsgTypeMarkdown,
 		"markdown": map[string]string{"content": markdown},
-		"msg_id":   replyTo,
-		"msg_seq":  seq,
+	}
+	if replyTo != "" {
+		data["msg_id"] = replyTo
+	}
+	if seq > 0 {
+		data["msg_seq"] = seq
 	}
 	out, err := c.sendMessage(ctx, target, data)
 	if err == nil {

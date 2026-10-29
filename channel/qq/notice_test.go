@@ -11,6 +11,7 @@ import (
 
 	"github.com/LaoQi/ivan/bus"
 	"github.com/LaoQi/ivan/channel"
+	"github.com/LaoQi/ivan/qqbot"
 )
 
 func newStateChannel(t *testing.T, f *fakeAPI, mutate func(*Config)) (*Channel, string) {
@@ -224,7 +225,7 @@ func TestNoticeSendsProactiveText(t *testing.T) {
 		t.Fatalf("通知应走主动消息，不带 msg_id: %+v", calls[0])
 	}
 	if mt, _ := calls[0]["msg_type"].(float64); int(mt) != 0 {
-		t.Fatalf("通知应为纯文本 msg_type=0: %+v", calls[0])
+		t.Fatalf("无语法特征的通知应为纯文本 msg_type=0: %+v", calls[0])
 	}
 	if calls[0]["content"] != "构建失败 — ci" {
 		t.Fatalf("正文不对: %+v", calls[0])
@@ -328,5 +329,77 @@ func TestNoticeViaManager(t *testing.T) {
 	}
 	if len(f.calls()) != 1 {
 		t.Fatalf("应真实发出: %v", f.calls())
+	}
+}
+
+// 正文含 markdown 语法时通知走 msg_type=2，且主动消息不带 msg_id/msg_seq。
+func TestNoticeMarkdownWhenSyntax(t *testing.T) {
+	f := newFakeAPI(t)
+	ch, path := newStateChannel(t, f, func(c *Config) { c.Markdown = true })
+	ch.initState()
+	ch.claimToken(directEvent("m-1", "u-1", readState(t, path).ClaimToken))
+	f.sent = nil
+
+	content := "## 构建失败\n- job #123 exit 1"
+	if got := ch.Notice(context.Background(), content); len(got) != 1 || got[0].Err != nil {
+		t.Fatalf("结果不对: %+v", got)
+	}
+	calls := f.calls()
+	if len(calls) != 1 {
+		t.Fatalf("应发一条: %d", len(calls))
+	}
+	if mt, _ := calls[0]["msg_type"].(float64); int(mt) != qqbot.MsgTypeMarkdown {
+		t.Fatalf("含语法特征的通知应走 markdown: %+v", calls[0])
+	}
+	if _, ok := calls[0]["msg_id"]; ok {
+		t.Fatalf("主动消息不应带 msg_id: %+v", calls[0])
+	}
+	if _, ok := calls[0]["msg_seq"]; ok {
+		t.Fatalf("主动消息不应带 msg_seq: %+v", calls[0])
+	}
+	md, _ := calls[0]["markdown"].(map[string]any)
+	if c, _ := md["content"].(string); !strings.Contains(c, "构建失败") {
+		t.Fatalf("markdown 正文不对: %+v", calls[0])
+	}
+}
+
+// markdown 开关关闭时通知仍走纯文本。
+func TestNoticePlainWhenMarkdownDisabled(t *testing.T) {
+	f := newFakeAPI(t)
+	ch, path := newStateChannel(t, f, func(c *Config) { c.Markdown = false })
+	ch.initState()
+	ch.claimToken(directEvent("m-1", "u-1", readState(t, path).ClaimToken))
+	f.sent = nil
+
+	if got := ch.Notice(context.Background(), "## 标题\n- 项"); len(got) != 1 || got[0].Err != nil {
+		t.Fatalf("结果不对: %+v", got)
+	}
+	calls := f.calls()
+	if mt, _ := calls[0]["msg_type"].(float64); int(mt) != 0 {
+		t.Fatalf("开关关闭应走纯文本: %+v", calls[0])
+	}
+}
+
+// markdown 被平台拒收时通知回退纯文本重发（主动消息序号仍应省略）。
+func TestNoticeMarkdownRejectedFallsBackToText(t *testing.T) {
+	f := newFakeAPI(t)
+	f.failMarkdown = true
+	ch, path := newStateChannel(t, f, func(c *Config) { c.Markdown = true })
+	ch.initState()
+	ch.claimToken(directEvent("m-1", "u-1", readState(t, path).ClaimToken))
+	f.sent = nil
+
+	if got := ch.Notice(context.Background(), "## 标题\n正文"); len(got) != 1 || got[0].Err != nil {
+		t.Fatalf("回退后应成功: %+v", got)
+	}
+	calls := f.calls()
+	if len(calls) != 2 {
+		t.Fatalf("应两次调用（markdown + 纯文本回退），得到 %d", len(calls))
+	}
+	if mt, _ := calls[1]["msg_type"].(float64); int(mt) != 0 {
+		t.Fatalf("回退应走纯文本: %+v", calls[1])
+	}
+	if content, _ := calls[1]["content"].(string); !strings.Contains(content, "标题") {
+		t.Fatalf("回退正文不对: %+v", calls[1])
 	}
 }
