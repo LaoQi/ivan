@@ -36,10 +36,6 @@ func TestManifestSelfDoc(t *testing.T) {
 	if !strings.Contains(out["usage"].(string), "{{base}}/notify") {
 		t.Fatalf("usage 缺占位符: %v", out["usage"])
 	}
-	if !strings.Contains(out["usage"].(string), "no_targets") {
-		t.Fatalf("usage 应说明通知目标的确定方式与 no_targets: %v", out["usage"])
-	}
-	note, _ := first["note"].(string)
 	notifyNote := ""
 	for _, e := range eps {
 		m, _ := e.(map[string]any)
@@ -47,10 +43,15 @@ func TestManifestSelfDoc(t *testing.T) {
 			notifyNote, _ = m["note"].(string)
 		}
 	}
-	if !strings.Contains(notifyNote, "认领") || !strings.Contains(notifyNote, "no_targets") {
-		t.Fatalf("notify 端点说明应交代目标来源与 no_targets，得到 %q", notifyNote)
+	if !strings.Contains(notifyNote, "no_targets") {
+		t.Fatalf("notify 端点说明应给出回执取值，得到 %q", notifyNote)
 	}
-	_ = note
+	// 接口文档是给调用方看的：不暴露 ivan 内部的目标认领机制
+	for _, text := range []string{out["usage"].(string), notifyNote} {
+		if strings.Contains(text, "认领") || strings.Contains(text, "openid") {
+			t.Fatalf("接口说明不应暴露内部机制: %q", text)
+		}
+	}
 }
 
 func TestManifestVersionAndMethod(t *testing.T) {
@@ -90,10 +91,16 @@ func TestGuideEndpoint(t *testing.T) {
 	for _, want := range []string{
 		"POST /notify", "POST /request", "GET /request?session=",
 		"/healthz", "/.well-known/service.json", "/guide.md",
-		"targets[].result", "no_targets", "认领令牌", "20 条/分钟",
+		"targets[].result", "no_targets", "不要重试",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("指南缺少 %q", want)
+		}
+	}
+	// 接口指南是给调用方看的：不暴露 ivan 内部的目标认领机制
+	for _, leak := range []string{"认领", "openid", "open_id", "channel.Noticer", "no_targets 不要重试（重试不会"} {
+		if strings.Contains(text, leak) {
+			t.Fatalf("指南不应暴露内部实现 %q", leak)
 		}
 	}
 	resp2, err := http.Post(c.url(t, PathGuide), "text/plain", strings.NewReader("x"))

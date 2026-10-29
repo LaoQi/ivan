@@ -17,6 +17,8 @@
 
 两者的差别不是配置项，而是**一个只出站、一个只进站**：`/notify` 不需要回复也不该慢；`/request` 下游不选出口、不收推送——发请求、拿会话键、自己轮询。回合的出站（终局回复、确认问题、告警）一律**尽力而为广播到可用渠道**，不定向回调用方。
 
+**对外文档只讲调用方需要知道的**（纪律）：`channel/http/guide.md` 与 manifest 是**给其他 agent 看的**，只写"能发通知、怎么发、回执怎么用"——不写目标如何产生（认领、通道名、openid、平台频控阈值等全是 ivan 内部实现），调用方既用不上也无权关心。内部机制只写在本文件与 `docs/qq-bot.md`。`channel/http` 的测试对 guide/manifest 有反向断言：出现 `认领`/`openid` 即失败。
+
 **为什么归 Trigger 层而不是 `Channel` 层**（术语修订）：`Channel` 接口只拿得到 `Bus`，出站只能 `bus.Post`（丢弃不可知、拿不到投递错误），而 `/notify` 必须能给调用方回执。所以它和 `schedule` 同属"产出/转发 + 同步回执"这一类，按 `docs/plan.md` §4 的三分法归 Trigger 层；实现上仍复用 `channel.Manager.Route` 做真实投递，只是**直投而不经总线**（与 `runner.TriggerJob` 同构）。
 
 ## 2 `POST /notify`

@@ -6,8 +6,8 @@
 ## 能力边界
 
 - ivan 是无人值守后台 agent；`/request` 为**异步**入口：受理即返回会话键，结果靠轮询，没有回调/推送
-- 通知与请求结果的**出站目标由各通道的默认通知出口自决**（通道决定发给谁），请求方不能指定发给谁，也无需预先知道任何收件人标识
-- 通知的**可达性取决于运维是否已配置好收件目标**：0 个目标时回执会明确给出 `no_targets`（不会假装已送达），此时应联系 ivan 的运维完成认领，而不是反复重试
+- 通知与请求结果的**投递目标由 ivan 侧决定**，请求方不指定、也无需知道任何收件人标识：只需发内容，发给谁由 ivan 负责
+- 通知是尽力而为：可能全部送达、部分送达或未送达，**以回执为准**（见 `/notify` 的 `status` 与 `targets[].result`）
 - 无鉴权，仅限内网使用，不要暴露公网
 - JSON 请求需 `Content-Type: application/json`；错误统一 `{"status":"rejected","message":"<原因>"}` + 对应状态码
 
@@ -15,7 +15,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/notify` | 通知转发（广播到各通道自持的通知出口） |
+| POST | `/notify` | 发通知给用户（纯转发，不经过模型） |
 | POST | `/request` | 提交 agent 任务（异步受理） |
 | GET | `/request?session=<键>` | 轮询任务结果 |
 | GET | `/healthz` | 健康检查 |
@@ -24,7 +24,7 @@
 
 ## POST /notify
 
-把一条通知广播给 ivan 的各通道通知出口。尽力而为，不保证送达。
+把一条通知交给 ivan 投递给用户。尽力而为，不保证送达；投递目标由 ivan 决定，请求方不指定。
 
 请求体（`source` 必填；`title` 与 `body` 至少一项非空）：
 
@@ -42,24 +42,14 @@
 
 ```json
 {"status":"delivered","deduped":false,"truncated":false,
- "targets":[{"name":"main","channel":"qq","result":"sent"}]}
+ "targets":[{"name":"…","channel":"…","result":"sent"}]}
 ```
 
-- `status` 取值：`delivered` / `partial`（均 200）/ `failed`（503，含逐目标失败明细）/ `deduped`
-- 回执 `targets[].name` 形如 `<通道名>:<通道内目标标识>`（由通道自决，如 `qq:<openid>`）；`targets[].result` 取值 `sent` / `failed` / `no_targets`
-- 没有通道实现通知出口或全部无可投递目标时 503 `failed`；超过限额（默认 30 次/分钟）429；缺 `source` 400
-
-### 通知目标是怎样确定的（调用方不需要懂，但会看到这些回执）
-
-目标完全由 ivan 侧各通道自己维护，**请求体里没有、也不该有收件人字段**。当前 QQ 通道的做法是运维认领：ivan 首次启动生成一次性认领令牌，本人用 QQ 私聊机器人发送该令牌，该账号即成为通知目标（令牌随之轮换）。因此常见三种回执：
-
-| 回执 | 含义 | 调用方该做什么 |
-|---|---|---|
-| `delivered` + `result: "sent"` | 至少一个目标已投出 | 什么都不用做 |
-| `failed` 503 + `result: "no_targets"` | 通道尚无收件目标（尚未认领） | 联系运维完成认领；**不要反复重试**，重试不会自行恢复 |
-| `failed` 503 + `result: "failed"` + `error` | 有目标但投递失败（平台拒收/频控/网络） | 可退避重试；`error` 里带平台原始原因 |
-
-> QQ 通道受平台频控：单聊约 20 条/分钟、每用户每天 1000 条，超限会被拒收。批量告警请自行聚合，别把 `/notify` 当日志管道。
+- `status` 取值：`delivered`（全部送达）/ `partial`（部分送达，均 200）/ `failed`（未送达，503）/ `deduped`（去重命中，未重复发送）
+- `targets[].result` 取值：`sent`（已发）/ `failed`（发送失败，`error` 给原因）/ `no_targets`（当前没有可投递的收件人）
+- **怎么处理**：`delivered`/`partial` 视为已送达，无需动作；`failed` 可退避重试；`no_targets` 重试无效，不要重试
+- 超过限额（默认 30 次/分钟）429；缺 `source` 400
+- 批量通知请自行聚合后发送，不要把 `/notify` 当日志管道
 
 ## POST /request
 
