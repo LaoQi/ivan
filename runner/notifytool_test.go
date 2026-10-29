@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/LaoQi/ivan/bus"
+	"github.com/LaoQi/ivan/config"
 	"github.com/LaoQi/ivan/internal/fakellm"
 )
 
@@ -106,5 +108,68 @@ func TestSessionStateTracksOutcome(t *testing.T) {
 	_, _, known = rg.r.SessionState("http:none")
 	if known {
 		t.Fatal("未知会话应 unknown")
+	}
+}
+
+// 外部请求（Channel=http）回合结束时回报结果；普通会话不打扰用户。
+func TestExternalTurnReportsOnFinish(t *testing.T) {
+	n := sendToolRig(t, 1, 1, "qq:u1")
+	msg := bus.InboundMessage{
+		Channel:    "http",
+		ChatID:     "req-1",
+		MessageID:  "req-1",
+		Content:    "[外部服务请求] 来源=ci 目的=回报\n跑一下 pwd",
+		SessionKey: "http:ci",
+	}
+	if _, err := n.r.DispatchTurn(context.Background(), msg); err != nil {
+		t.Fatalf("DispatchTurn: %v", err)
+	}
+	notes := n.calls
+	if len(notes) != 1 {
+		t.Fatalf("外部请求结束应回报一条，实际 %d: %v", len(notes), notes)
+	}
+	got := notes[0]
+	for _, want := range []string{"外部请求 req-1", "处理完成", "用时"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("结束回报缺少 %q: %q", want, got)
+		}
+	}
+}
+
+func TestExternalTurnFailureReported(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Status: 400})
+	t.Cleanup(srv.Close)
+	rg := newRigTweak(t, srv, func(c *config.Config) { c.MaxRetries = 0 })
+	n := &noticeRig{rig: rg, sent: 1, total: 1, names: []string{"qq:u1"}}
+	rg.r.opts.Notice = n.notice
+	msg := bus.InboundMessage{
+		Channel:    "http",
+		ChatID:     "req-2",
+		MessageID:  "req-2",
+		Content:    "[外部服务请求] 来源=ci 目的=回报\n干活",
+		SessionKey: "http:ci",
+	}
+	if _, err := n.r.DispatchTurn(context.Background(), msg); err == nil {
+		t.Fatal("应失败")
+	}
+	if len(n.calls) != 1 || !strings.Contains(n.calls[0], "失败") {
+		t.Fatalf("失败也应回报且标明失败: %v", n.calls)
+	}
+}
+
+func TestNonExternalTurnNotReported(t *testing.T) {
+	n := sendToolRig(t, 1, 1, "qq:u1")
+	msg := bus.InboundMessage{
+		Channel:    "qq",
+		ChatID:     "u1",
+		MessageID:  "m1",
+		Content:    "你好",
+		SessionKey: "qq:c2c:u1",
+	}
+	if _, err := n.r.DispatchTurn(context.Background(), msg); err != nil {
+		t.Fatalf("DispatchTurn: %v", err)
+	}
+	if len(n.calls) != 0 {
+		t.Fatalf("普通会话不应收到结束回报: %v", n.calls)
 	}
 }

@@ -47,6 +47,7 @@ type Config struct {
 	RequestPerMinute int
 	RequestSession   string
 	Broadcast        func(ctx context.Context, content string) []TargetResult
+	Notice           func(ctx context.Context, content string)
 	Submit           func(msg bus.InboundMessage) bool
 	Query            func(session string) (RequestState, bool)
 	Audit            func(kind, text string)
@@ -319,6 +320,7 @@ func (c *Channel) submitRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.requestAccepted.Add(1)
+	c.announceStart(id, source, strings.TrimSpace(in.Identity), purpose, text)
 	c.audit("ext_request", fmt.Sprintf("source=%s identity=%s purpose=%s session=%s id=%s",
 		bus.OneLine(source, sourceLimit), bus.OneLine(strings.TrimSpace(in.Identity), identLimit),
 		bus.OneLine(purpose, purposeLim), session, id))
@@ -327,6 +329,29 @@ func (c *Channel) submitRequest(w http.ResponseWriter, r *http.Request) {
 		"session": session,
 		"id":      id,
 	})
+}
+
+// announceStart 在受理后立刻告诉用户「有外部请求、准备做什么」。
+// 不消耗模型回合：字段本来就是结构化的，直接渲染即可。
+func (c *Channel) announceStart(id, source, identity, purpose, text string) {
+	if c.cfg.Notice == nil {
+		return
+	}
+	var b strings.Builder
+	b.WriteString("收到外部请求 ")
+	b.WriteString(id)
+	b.WriteString("\n来源: ")
+	b.WriteString(bus.OneLine(source, 64))
+	if identity != "" {
+		b.WriteString("\n身份: ")
+		b.WriteString(bus.OneLine(identity, 64))
+	}
+	b.WriteString("\n目的: ")
+	b.WriteString(bus.OneLine(purpose, 200))
+	b.WriteString("\n内容: ")
+	b.WriteString(bus.OneLine(text, 300))
+	b.WriteString("\n\n开始处理，完成后回报结果。")
+	c.cfg.Notice(context.WithoutCancel(context.Background()), b.String())
 }
 
 func (c *Channel) queryRequest(w http.ResponseWriter, r *http.Request) {

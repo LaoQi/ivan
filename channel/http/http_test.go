@@ -16,11 +16,30 @@ import (
 )
 
 type recorder struct {
-	mu       sync.Mutex
-	sent     []string
-	err      error
-	failOne  string
-	noTarget bool
+	mu        sync.Mutex
+	sent      []string
+	err       error
+	failOne   string
+	noTarget  bool
+	announced []string
+}
+
+func (r *recorder) announce(content string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.announced = append(r.announced, content)
+}
+
+func (r *recorder) broadcasts() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.sent...)
+}
+
+func (r *recorder) announces() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.announced...)
 }
 
 func (r *recorder) broadcast(ctx context.Context, content string) []TargetResult {
@@ -68,6 +87,7 @@ func newTestChannel(t *testing.T, rec *recorder, submit func(bus.InboundMessage)
 		NotifyPerMinute:  30,
 		RequestPerMinute: 5,
 		Broadcast:        rec.broadcast,
+		Notice:           func(ctx context.Context, content string) { rec.announce(content) },
 		Submit:           submit,
 	})
 	if err := c.Start(context.Background(), bus.New(4, 4)); err != nil {
@@ -482,5 +502,50 @@ func TestStatsCounters(t *testing.T) {
 	}
 	if !strings.HasPrefix(st.Listen, "127.0.0.1:") || strings.HasSuffix(st.Listen, ":0") {
 		t.Fatalf("listen 应为实际地址: %q", st.Listen)
+	}
+}
+
+// 受理后立刻告诉用户「有外部请求、准备做什么」，且不消耗模型回合（是 Announce 而非广播投递）。
+func TestRequestAnnouncesStart(t *testing.T) {
+	rec := &recorder{}
+	c := newTestChannel(t, rec, nil)
+	resp, out := doJSON(t, http.MethodPost, c.url(t, PathRequest), map[string]string{
+		"source": "ci", "identity": "build-bot@runner-1",
+		"purpose": "部署回报", "text": "把 release-2.3.1 部署到 staging 并跑冒烟测试",
+	})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("状态码 = %d, body=%v", resp.StatusCode, out)
+	}
+	notes := rec.announces()
+	if len(notes) != 1 {
+		t.Fatalf("受理时应发一条开始通知，实际 %d 条: %v", len(notes), notes)
+	}
+	got := notes[0]
+	for _, want := range []string{"收到外部请求", "ci", "build-bot@runner-1", "部署回报", "release-2.3.1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("开始通知缺少 %q: %q", want, got)
+		}
+	}
+	if !strings.Contains(got, out["id"].(string)) {
+		t.Fatalf("开始通知应带请求 id: %q", got)
+	}
+	if len(rec.broadcasts()) != 0 {
+		t.Fatalf("开始通知不应走通知广播管线: %v", rec.broadcasts())
+	}
+}
+
+// 未接 Notice 钩子时不应崩（老装配/测试可省）。
+func TestRequestAnnounceWithoutHook(t *testing.T) {
+	c := New(Config{Listen: "127.0.0.1:0", MaxBodyBytes: 65536, NotifyPerMinute: 30, RequestPerMinute: 5,
+		Broadcast: (&recorder{}).broadcast, Submit: func(bus.InboundMessage) bool { return true }})
+	if err := c.Start(t.Context(), bus.New(4, 4)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop(t.Context()) })
+	resp, _ := doJSON(t, http.MethodPost, c.url(t, PathRequest), map[string]string{
+		"source": "ci", "purpose": "p", "text": "t",
+	})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
 	}
 }

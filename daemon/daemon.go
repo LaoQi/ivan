@@ -162,6 +162,7 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			RequestPerMinute: cfg.HTTP.RequestPerMinute,
 			RequestSession:   cfg.HTTP.Request.Session,
 			Broadcast:        d.broadcastNotice,
+			Notice:           func(ctx context.Context, content string) { _, _, _ = d.noticeSummary(ctx, content) },
 			Submit:           func(m bus.InboundMessage) bool { return d.bus.Publish(m) },
 			Query: func(session string) (httpchan.RequestState, bool) {
 				r := d.runner

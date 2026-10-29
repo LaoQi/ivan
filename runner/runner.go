@@ -164,8 +164,10 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 		inst.setCancel(nil)
 	}()
 
+	started := time.Now()
 	t := &task{r: r, inst: inst, msg: msg, key: key}
 	err := t.run(runCtx)
+	r.reportExternalTurn(msg, t.text(), err, time.Since(started))
 	if n := t.usedTokens(); n > 0 {
 		r.chargeTokens(n)
 	}
@@ -199,6 +201,31 @@ func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn
 		turn.NotifyError = "出站队列已满或已关闭"
 	}
 	return turn, err
+}
+
+// reportExternalTurn 对「外部服务经 /request 发起的回合」在结束时回报结果：
+// 用户看不到 http 会话本身，不主动回报就只剩一条静默的 202。
+func (r *Runner) reportExternalTurn(msg bus.InboundMessage, reply string, turnErr error, dur time.Duration) {
+	if msg.Channel != "http" || r.opts.Notice == nil {
+		return
+	}
+	id := msg.MessageID
+	var b strings.Builder
+	b.WriteString("外部请求 ")
+	b.WriteString(id)
+	b.WriteString(" 处理完成（用时 ")
+	b.WriteString(dur.Round(time.Second).String())
+	b.WriteString("）")
+	if turnErr != nil {
+		b.WriteString("：失败 — ")
+		b.WriteString(briefErr(turnErr))
+	}
+	text := strings.TrimSpace(reply)
+	if text != "" {
+		b.WriteString("\n\n")
+		b.WriteString(bus.Clip(text, 500))
+	}
+	_, _, _ = r.opts.Notice(context.WithoutCancel(context.Background()), b.String())
 }
 
 func replyChannel(msg bus.InboundMessage) string {
