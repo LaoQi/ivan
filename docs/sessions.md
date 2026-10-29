@@ -52,7 +52,7 @@ Inbound → runner.dispatch(msg)
 - **取并发槽的顺序是硬约束**：先排队（每会话 FIFO 队列，`runner.session_queue` 默认 8）→ 轮到了再取会话锁 → 最后才取跨会话并发槽。**反了就是缺陷**：同一会话的第二条消息会先抢到并发槽、再阻塞等会话锁，`max_concurrent=2` 时同会话连发两条即可占满两个槽、其他会话全部堵死（2026-10-30 修，见 §11）。
 - 队列上限 `runner.session_queue`（默认 8，`0`/负值回落默认）：超限**不静默吞掉**——`DispatchTurn` 返回 `ErrQueueFull`、计 `queue_dropped`（`status` 可见）、人类日志记一行 `busy`，总线层不再重复计丢弃。
 - **同会话顺序由队列保证**，不依赖 goroutine 抢锁：旧实现里两条消息谁先进 `DispatchTurn` 取决于调度，顺序不确定。
-- 运行中任务的取消（**已实现**）：`ivan cancel <会话键>` 走 socket → `runner.CancelTurn(key)` 取消该会话当前回合的 ctx（agent 支持 ctx 取消，`run_shell` 子进程按 tanya 既有语义处理）；没有在跑的回合时明确报错。
+- 运行中任务的取消（**已实现，有已知缺口**）：`ivan cancel <会话键>` 走 socket → `runner.CancelTurn(key)` 取消该会话当前回合的 ctx（agent 支持 ctx 取消，`run_shell` 子进程按 tanya 既有语义处理）；没有在跑的回合时明确报错。**缺口**：消息还在队列或卡在等并发槽时取消不到（`CancelTurn` 返回 false、报"没有在跑的回合"），但消息确实存在——详见 §11 结尾。
 - 停机：SIGTERM → 停止入站 → 等在跑回合收尾（超时则取消）→ 刷出站 → 落状态。
 
 ## 6 重启恢复
@@ -106,7 +106,7 @@ Inbound → runner.dispatch(msg)
 1. **两档阈值交接**：`task.pressure()` 返回 `none|hint|force`（绝对值 `handoff_hint_tokens`/`handoff_force_tokens`，默认 180K/256K，配置里强制档必须大于建议档否则启动报错）；建议档注入"收尾后交接"提示，强制档注入"立即交接、本回合别做别的"指令。`hinted`/`forced` 各自每任务只触发一次（事件 `handoff_hint`/`handoff_force`），**每次交接后清零**（并记 `hops`，新会话基线可能仍超阈值）；强制档提示后模型仍不交接 → 停止任务并记 `handoff_forced`（不再发请求），已交接过的任务给出"新会话基线即超阈值"的诊断文案。`auto_continue` 关时只多做提示轮（把上下文安全交出去），交接后仍不续跑；`status` 的 `budget` 行显示两档阈值与 `hints/forced` 计数。
 2. **预算熔断**（三处闸门 + 一处持久化）：`max_turns_per_task` / `max_tokens_per_task` / `max_tokens_per_day`，前两者按任务、后者按**本地日**；日用量由 `data.State` 的 `usage{date,tokens}` 记录（原子写，随 `state.json`），`DispatchTurn` 结束时由 `runner.chargeTokens` 累加，`runner.Budget()` 对外暴露给调度器。调度器不再自带计数器（P3 的 `schedule.max_tokens_per_day` 已删除，统一到 runner，避免两个预算口径）。
 3. **暂停开关语义**：`paused` 只挡无人值守路径（定时作业、交接续跑、阈值交接提示），用户消息照常处理；事件分别记 `paused`（runner）与 `job_paused`（调度器）。
-4. **取消**：实例持当前回合 `context.CancelFunc`，`CancelTurn(key)` 取消并返回是否有在跑回合；`ivan cancel <会话键>` 经 socket 调用。
+4. **取消**：实例持当前回合 `context.CancelFunc`，`CancelTurn(key)` 取消并返回是否有在跑回合；`ivan cancel <会话键>` 经 socket 调用。该机制只覆盖**已真正开始执行**的回合，排队与等并发槽阶段覆盖不到（§11 结尾）。
 5. **记忆/目标**：`prompt.Info{Workspace,DataDir,Session,Memory,Goals}`；记忆路径 `<data_dir>/memory/<key-slug>.md`、目标 `<workspace>/GOALS.md`；`system_prompt.md` 增"记忆与目标"行为约定（按需读、一行一条追加、不删未确认条目）。
 6. **测试**：`runner/p4_test.go`（阈值提示注入到第二轮且首轮不带、每任务只提示一次、未超阈值不提示、暂停不提示、暂停不续跑、正常续跑、日预算停续跑 + 跨进程累计、`CancelTurn` 真取消 httptest 阻塞请求、系统提示含记忆/目标路径）、`data`（日用量累加/跨日清零/重启保留）、`daemon`（`cancel` 参数与空闲报错、`pause/resume` 反映到 `status.runner.paused`）。
 7. **P4 遗留的收口（2026-10-21 补齐）**：
@@ -144,7 +144,21 @@ Inbound → runner.dispatch(msg)
 
 **顺带修掉的测试基建缺陷**：`internal/fakellm` 的 `Gate/Hold/Release` 此前是**死代码**（`handle` 里从未读 `s.gate`），导致任何想制造"上游卡住"的用例都拿不到阻塞点。现在 `handle` 在写响应前等待 gate，并响应 `r.Context()` 取消。
 
-**未做**（明确不在本次范围）：跨会话并发槽的公平性（谁先抢到谁先跑，无 FIFO 保证）。
+**跨会话并发槽的公平性：已评估，判定不需要处理**（2026-10-30）。原表述"谁先抢到谁先跑、无 FIFO 保证"**不准确**，实测与运行时实现都证明等待队列天然公平：
+
+1. **运行时依据**：跨会话闸门是 `r.sem chan struct{}`。`runtime/chan.go` 里 `sendq` 是双向链表，`enqueue` 追加到队尾、`dequeue` 从队头取，阻塞在同一 channel 上的 goroutine **严格 FIFO 唤醒**。
+2. **单条 vs 积压**：`max_concurrent=1`，A 会话已有 6 条排队时 B 插进来 → B 排第 2 位、只被插队 1 个回合。
+3. **15 轮分布统计**：同场景反复跑 → **每轮都被插队恰好 1 个回合，最大 1**，无长尾。
+4. **并发洪峰**：`max_concurrent=2`、30 个会话同一瞬间抢槽、Z 挤在中间 → Z 等 370ms，期间 29 个回合完成（Z 是第 30 个来的，前面本就该先跑，属正常排队不是饥饿）。
+
+真正无序的只有"同一瞬间新到达、尚未阻塞进 waitq"的纳秒级窗口，任何调度器都无解、也无实际影响。**结论：不为公平性引入调度器代码。**
+
+**已知缺口：排队/等槽阶段的消息取消不到**（2026-10-30 记录，**未修**）。`runQueued` 是"先拿会话锁、再等并发槽"，因此一条消息可能长时间停在等槽的 `select` 上，此时：
+
+- `CancelTurn(key)` 返回 `false`（`inst.cancelFunc()` 还没被设置），用户会看到"没有在跑的回合"，但消息确实卡着并占着排队位；
+- 该实例的会话锁被一个**并未真正执行**的回合持有，期间 `status` 显示 `Running=true`、实例不可被淘汰（`idleLocked()` 判为不空闲）。
+
+实测复现：`max_concurrent=1` 时 B 会话的消息卡在等槽，`CancelTurn("cli:b")` 返回 `false`、`Dispatch` 仍阻塞；C 会话等槽期间 `锁被占=true worker=true 队列=0`，`CancelTurn("cli:c")` 同样返回 `false`。触发条件是并发额度被占满（多来源 `/request` 与用户消息撞车、或多个定时作业同时触发）。**修法方向**：等槽时也把 cancel 登记到实例上，让 `CancelTurn` 覆盖"已出队但未开始执行"的状态。
 
 ## 12 实例池上界修复（2026-10-30）
 
