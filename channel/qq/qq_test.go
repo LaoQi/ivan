@@ -23,6 +23,7 @@ type fakeAPI struct {
 	paths        []string
 	auth         []string
 	failMarkdown bool
+	denyIDs      map[string]bool
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -46,7 +47,18 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	f.paths = append(f.paths, r.URL.Path)
 	f.auth = append(f.auth, r.Header.Get("Authorization"))
 	failMD := f.failMarkdown
+	deny := false
+	for id := range f.denyIDs {
+		if strings.Contains(r.URL.Path, "/v2/users/"+id+"/") {
+			deny = true
+		}
+	}
 	f.mu.Unlock()
+	if deny {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"err_code":40054013,"message":"用户拒收消息"}`))
+		return
+	}
 	if failMD {
 		if mt, _ := body["msg_type"].(float64); int(mt) == qqbot.MsgTypeMarkdown {
 			w.WriteHeader(http.StatusBadRequest)
@@ -60,6 +72,16 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		_, _ = w.Write([]byte(`{"id":"out-1","timestamp":"2026-10-20T00:00:00Z"}`))
 	}
+}
+
+func (f *fakeAPI) deny(openid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.denyIDs == nil {
+		f.denyIDs = map[string]bool{}
+	}
+	f.denyIDs[openid] = true
+	return nil
 }
 
 func (f *fakeAPI) calls() []map[string]any {

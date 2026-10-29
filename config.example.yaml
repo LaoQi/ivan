@@ -132,5 +132,8 @@ channels:
     typing: true
     # 被动回复窗口用尽后是否允许转为主动消息（平台频控 + 用户可关闭）
     allow_proactive: false
+    # 通知目标不在此配置：QQ 通道首启生成认领令牌（日志可见，落 <data_dir>/qq/channel.json），
+    # 用本人 QQ 私聊机器人发送该令牌即把该账号设为通知目标，令牌随之轮换并写回该文件
+
     # 网关重连指数退避上限（秒）
     reconnect_max_sec: 60

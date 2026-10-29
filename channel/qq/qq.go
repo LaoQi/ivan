@@ -51,6 +51,7 @@ type Config struct {
 	MediaDir       string
 	MediaMaxBytes  int64
 	Timeout        time.Duration
+	StatePath      string
 	UserAgent      string
 	APIBase        string
 	TokenURL       string
@@ -67,6 +68,7 @@ type Channel struct {
 	groups  map[string]struct{}
 	seqs    map[string]*replyState
 	targets map[string]qqbot.Target
+	state   *stateBox
 	started bool
 }
 
@@ -113,12 +115,17 @@ func New(cfg Config) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
+	state, err := loadState(cfg.StatePath)
+	if err != nil {
+		return nil, err
+	}
 	return &Channel{
 		cfg:     cfg,
 		client:  client,
 		groups:  map[string]struct{}{},
 		seqs:    map[string]*replyState{},
 		targets: map[string]qqbot.Target{},
+		state:   state,
 	}, nil
 }
 
@@ -228,6 +235,7 @@ func (c *Channel) Start(ctx context.Context, b *bus.Bus) error {
 	}
 	c.started = true
 	c.mu.Unlock()
+	c.initState()
 	return c.client.Start(ctx, handler{ch: c, bus: b})
 }
 
@@ -256,6 +264,9 @@ func (h handler) OnError(err error) {
 }
 
 func (h handler) OnMessage(ev qqbot.MessageEvent) {
+	if h.ch.claimToken(ev) {
+		return
+	}
 	msg, ok := h.ch.translate(ev)
 	if !ok {
 		return

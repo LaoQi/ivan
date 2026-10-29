@@ -3,12 +3,13 @@
 常驻的极简 agent：**特化在定时触发与计划任务**，全部输入输出收敛到 channel 抽象（IM 只是其中一个 channel）。与 tanya 相对——tanya 是人在终端里对话的前台工具，ivan 是无人值守的后台代理。模块路径 `github.com/LaoQi/ivan`。
 本文件只记现行约束，细节见 `docs/`；变更记录一律写根目录 `CHANGELOG.md`（新条目置顶）。
 
-> 状态：**P0–P4 已完成**，另加**外部入口（HTTP 通知中心 + agent 请求，见 `docs/notify.md`）**（P4：两档阈值自动交接 建议 180K / 强制 256K、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`；P4 遗留的崩溃回合 `interrupted` 标记与记忆文件裁剪已补齐）。P0–P3：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。**P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）为保留计划，暂无实施规划**——相关子项均未实施，不要按"已交付"引用。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13、`docs/channels.md` §10、`docs/notify.md` §7。
+> 状态：**P0–P4 已完成**，另加**外部入口（HTTP 通知中心 + agent 请求，见 `docs/notify.md`）**（P4：两档阈值自动交接 建议 180K / 强制 256K、三档预算熔断（轮次/任务/日）+ 跨进程日用量、暂停开关只挡无人值守路径、记忆/目标按需读取、`ivan cancel`；P4 遗留的崩溃回合 `interrupted` 标记与记忆文件裁剪已补齐）。P0–P3：骨架与探针、通道与 daemon、QQ 真机全链路、定时与计划任务（`schedule` + sqlite + QQ 真机提醒）。**P5（安全与运维：审批档、危险命令规则、限额、日志轮转、systemd、`ivan doctor`）为保留计划，暂无实施规划**——相关子项均未实施，不要按"已交付"引用。阶段与验收见 `docs/plan.md` §8，实现记录见 `docs/sessions.md` §10、`docs/schedule.md` §8、`docs/qq-bot.md` §13/§14、`docs/channels.md` §10、`docs/notify.md` §7。
 
 ## 设计约束
 
 - 定位只做三件事：通道、调度、会话；不做 Web UI、多渠道全家桶、语音/视频、skills/MCP、多租户
 - **外部入口**：`channel/http` 一个监听两个业务端点（`/notify` 纯转发通知用户、`/request` 与 agent 沟通）外加描述类只读端点（`/healthz`、`/.well-known/service.json` 自述、`/guide.md` 接口指南），路径即语义、无模式开关；出站一律尽力而为、目标由**通道默认通知出口自决**（`channel.Noticer` 可选能力：`Notice(ctx, content) []NoticeResult`，daemon 遍历实现该能力的通道广播；外部请求体与模型都不得指定目标，也不存在 `http.targets` 之类的目标清单配置）；`/request` 异步：受理即返回会话键（按来源派生 `http:<source>`），结果经 `GET /request?session=` 轮询 runner 结果表，不做回执管道；`send_message` 与 `/notify`、`ivan notify` 走同一广播管线（不指定出口，模型不能给任意账号发消息）
+- **QQ 通知目标不可配置、只能认领**：`user_openid` 是随 app 变化的平台标识（开发者后台不可见），因此 `channel/qq` 自持状态文件 `<data_dir>/qq/channel.json`（0600 原子写），首启生成 `claim_token` 并打日志，本人私聊机器人发送该令牌即把该账号写为通知目标、轮换令牌并写回；认领消息不进 agent、受 `allow_from` 约束、允许新账号覆盖。通知走主动消息纯文本（无 `msg_id`，不受 `allow_proactive` 门禁）+ 通道自切分；无目标时 `Notice` 返回空 → daemon 如实回执 `no_targets`
 - **通知回执必须如实**：`Manager.Route` 对无目标通道只计 `unmatched` 并返回 nil，通知类直投一律经 daemon 的 `deliverStrict`（前后比对 unmatched 计数，涨了返回 `ErrUnroutable`），否则回执会谎报"已投递"
 - 复用核心库 `github.com/LaoQi/battlelab`（`agent`/`tools`/`ctty`，本地 `../battlelab`，`go.work` 联调；2026-10-22 从 tanya 抽出）；**不复用** tanya 的 `repl`/`readline`/`views` 与任何终端所有权（常驻无 TTY 场景）。库侧能力缺口在 battlelab 小步补齐，两仓 CHANGELOG 同步
 - **请求重试**：由库侧 `agent.Config.MaxRetries` 提供（`max_retries`，默认 2、`IVAN_MAX_RETRIES` 覆盖、`0` = 关闭、上限 20 越界回落），重试在库的 `Client.ChatStream` 内层完成、已输出内容后失败不再重试；无人值守路径同样生效（重试期间对通道静默），事件日志落 `retry` 条目（含错误原文与 attempt/max/delay），预算口径不变——**不要再包一层自己的重试**
@@ -16,6 +17,7 @@
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 battlelab/tanya（`bus`+`channel` 抽库时成对抽出）
 - **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
 - **文本长度一律按字符（rune）计**：`bus.RuneLen/Clip/Truncate/OneLine` 是唯一口径（`clip`/`options`/`brief`/`oneLine`/`quote`/`shortID`/`KeySlug`/`taskSlug` 一律按字符截断）；**不得用 `len(s)` 判定文本长度、不得用 `s[:n]` 切文本**（中文 3 字节/字，字节判定配 rune 切片会 panic 或切出乱码）——字节口径只用于文件大小（`data.TrimFileTail`）；`schedule` 只依赖标准库，包内自持同语义实现
+- **通道自有状态放在通道自己的文件里**：需要持久化的通道内状态（如 QQ 的认领令牌与通知目标）落在 `<data_dir>/<通道>/` 下由通道自己读写（原子写、损坏报错不重建），**不回写主配置**（会把用户手写的注释与格式丢掉），也不进 `config`/`data` 包——`channel/qq` 仍只依赖 `bus`/`channel`/`qqbot` + 标准库
 - **富文本出站由通道声明**：通道决定出站形态与语法子集（QQ `channels.qq.markdown` 默认开，只在正文含 markdown 语法特征时走 `msg_type=2`），降级（表格→要点行、围栏→缩进、本地图片→文字）与被平台拒收后的纯文本回退都在 `channel/qq` 内；长文本切分经可选能力 `channel.Splitter` 由通道接管（markdown 感知 + 补闭合围栏），Manager 不感知平台语法
 - 协议与业务的分界固定在 `qqbot/` 边界：协议细节（token 刷新、重连、心跳、限流、错误码）留在协议包内；`channel/qq` 只做消息翻译、图片落盘、`msg_seq` 计数
 - 依赖极简：新增依赖先讨论；QQ 协议**自实现**（不用 `tencent-connect/botgo`，D3）；WebSocket 用 `github.com/gorilla/websocket`；作业存储用 `modernc.org/sqlite`（纯 Go 无 cgo，D8）
@@ -65,7 +67,7 @@ probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
 channel/http/         外部入口：/notify 纯转发（fan-out 配置目标）+ /request 异步受理与查询（轮询回合结果）+ /healthz + /.well-known/service.json 自述与 /guide.md 指南（service-manifest/v1，{{base}} 占位符，供 tower 抓取）[已实现]
 qqbot/                QQ 协议客户端：token 刷新 / gateway+ws 生命周期 / REST 收发 / 流式消息与输入状态 / 去重 / 错误分类（仅依 stdlib + gorilla/websocket）[已实现]
-channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、markdown 出站与降级（md.go）、msg_seq 计数、图片下载/上传、白名单 [已实现]
+channel/qq/           qq 适配器：事件→bus.InboundMessage、出站翻译、markdown 出站与降级（md.go）、msg_seq 计数、图片下载/上传、白名单、通知出口与令牌认领（notice.go）[已实现]
 schedule/             作业模型（at/every）、存储抽象 Store + 进程内实现、调度循环（wake/timer、错过策略、暂停与预算闸门）[已实现]
 schedule/sqlite/      作业库实现（modernc.org/sqlite，WAL+FULL、user_version 迁移、损坏不重建）[已实现]
 ```

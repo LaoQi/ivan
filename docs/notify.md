@@ -127,13 +127,14 @@ http:
   dedupe_seconds: 600       # 0 = 关闭去重
   notify_per_minute: 30
   request_per_minute: 5
-  # 通知出口不在此配置：由各通道实现 channel.Noticer 自决（当前无通道实现，待 QQ 等补齐）
+  # 通知出口不在此配置：由各通道实现 channel.Noticer 自决（QQ 通道已实现，目标见 docs/qq-bot.md §14）
   request:
     session: ""             # 空 = 按来源派生 http:<source>
 ```
 
 - **鉴权：当前不做**（仅内网）。入口默认开启、默认监听 `127.0.0.1`；内网要可达就改 `listen`。**切勿暴露公网**——将来要暴露再加鉴权，不预留半成品字段。
-- **通知出口是通道的能力不是配置**：`channel.Noticer`（`Notice(ctx, content) []NoticeResult`）由各通道自行实现（发给谁、怎么发、切分与 markdown 都在通道内决定）；未实现的通道不参与广播。当前尚无通道实现（QQ 的固定发送目标待做），此时 `/notify` 与 `ivan notify` 返回明确的"没有实现通知出口的通道"（503），`send_message` 对模型同样明确报错，`/request` 与查询端点照常可用。
+- **通知出口是通道的能力不是配置**：`channel.Noticer`（`Notice(ctx, content) []NoticeResult`）由各通道自行实现（发给谁、怎么发、切分与 markdown 都在通道内决定）；未实现的通道不参与广播。
+- **QQ 通道已实现通知出口**：目标由通道自持的认领机制决定（首启生成令牌 → 本人私聊机器人发送该令牌 → 该账号成为通知目标），详见 `docs/qq-bot.md` §14；尚未认领时 `Notice` 返回空结果，回执为 `no_targets`（"通道当前没有可投递目标"）。没有**任何**通道实现通知出口时，`/notify` 与 `ivan notify` 返回 503"没有实现通知出口的通道"，`send_message` 对模型同样明确报错，`/request` 与查询端点照常可用。
 - 端口被占会**启动失败**（默认 `127.0.0.1:8787`；改 `listen` 或显式 `enabled: false` 关闭入口）。
 - 观测：`ivan status` 的 `http` 行给 `notify=`（受理）/`delivered`/`partial`/`failed`/`deduped`/`rejected` 与 `request=`（受理）/`rejected`，以及 `last_error`；结构化事件 kind：`ext_notify`/`ext_notify_deduped`/`ext_notify_rejected`/`ext_request`/`ext_request_rejected`（均含 source 与结果，不含正文）。查询端点不记事件、不限频。
 - 停机：HTTP 监听随 daemon 启停；已受理的回合按 runner 停机语义收尾（等待或取消），查询端点随进程消失（连接拒绝），未落任何回执悬挂。

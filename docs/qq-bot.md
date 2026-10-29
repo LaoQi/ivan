@@ -244,3 +244,48 @@ qqbot.Handler{OnReady, OnMessage, OnError}  /  HandlerFunc
 - **图片出站已通**：`≤5MB` 走 `file_data`、`>5MB` 走分片（6.2MB → 2 片，`upload_prepare`/分片 `PUT`/`upload_part_finish`/`files` 合并全 200），用户侧收到图片。
 - **P2 全部能力已真机验证**：单聊文本、群 @、图片收发（内联 + 分片）、被动回复、去重、重连。
 - 期间发现并修正了 §4 的 `token` 前缀问题（裸 token 直接被 `op9` 拒绝）。
+
+## 14 通知出口与目标认领（2026-10-30）
+
+QQ 通道实现 `channel.Noticer`（`Notice(ctx, content) []channel.NoticeResult`），成为 `/notify`、`ivan notify`、`send_message` 的默认通知出口之一。**目标无法手工配置**：`user_openid` 是随 app 变化的平台标识，开发者后台也看不到，只能从入站事件或 `state.json` 的会话键里取，所以改成**通道自己认领**。
+
+### 14.1 官方能力边界（核对结论）
+
+- 发消息只有三个目标：单聊 `POST /v2/users/{user_openid}/messages`、群聊 `POST /v2/groups/{group_openid}/messages`、频道 `/channels/{channel_id}/messages` + 频道私信。**没有**「发给机器人管理者/管理员」的接口。
+- `keyboard.permission.type=1`（管理员）只是**内嵌键盘按钮的点击权限**，与消息目标无关；`GET /users/@me` 返回的是**机器人自己**。
+- 请求体里**没有任何收件人字段**：收件人完全由 URL 里的 openid 决定。可用的关联字段只有 `msg_id`+`msg_seq`（被动回复，60 分钟 / 4 次）、`event_id`（回复事件）、`is_wakeup`（互动召回，30 天内每周期 1 条）。
+- 主动消息前提：用户未关闭「允许主动发送」（关闭后一律失败，`40054013` 用户拒收）、需好友关系（`40054004` 无好友关系）；频控单关系 20/qpm、每用户每天 1000 条，超限 `40034100`。
+
+### 14.2 认领机制
+
+通道状态文件 `<data_dir>/qq/channel.json`（0600，临时文件 + fsync + rename 原子写；解析失败保留原文件并报错，不静默重建）：
+
+```json
+{
+  "version": 1,
+  "claim_token": "K7QM-3XPZ",
+  "notice_to": ["<user_openid>"],
+  "claimed_at": "2026-10-30T00:12:00+08:00"
+}
+```
+
+- **首启生成令牌**：`Start` 时若文件无 `claim_token`，用 `crypto/rand` 生成 `XXXX-XXXX`（32 字符表，去掉 `0/O/1/I` 便于手机输入）并原子写回；已有令牌则沿用（重启不轮换）。
+- **令牌可见**：写一行日志 `qq 通知认领令牌: K7QM-3XPZ（私聊发送该令牌即把该账号设为通知目标）`；令牌不进事件日志、不进记忆、不入会话。
+- **认领**：私聊消息 trim + 转大写后与令牌做 `subtle.ConstantTimeCompare`，命中则：写入 `notice_to=[该 openid]`、记录 `claimed_at`、**轮换新令牌并写回文件**、用被动回复回一条确认（含新令牌）；**该条消息不进入 agent**（不耗 token、令牌不进会话）。未命中则照常入站。
+- **白名单**：认领同样受 `allow_from` 约束；白名单外的令牌消息被吞掉（不回确认、不认领），不影响主流程。
+- **覆盖**：新账号用新令牌认领会覆盖原目标（换账号的场景），记一条日志；文件里始终有有效令牌，所以不需要额外子命令。
+
+### 14.3 投递语义
+
+- 目标 = 状态文件 `notice_to`（去重、trim）；为空 → `Notice` 返回空结果 → daemon 如实回执 `no_targets`，不猜、不兜底。
+- **主动消息**：`SendText(target, content, "", 0)`（`msg_id`/`msg_seq` 为 `omitempty`，自动省略）。通知不参与 `allow_proactive` 门禁——有目标本身就是主动推送的开关，避免"配了却发不出"。
+- **纯文本 `msg_type=0`**：通知是运维文本，走最稳的通路，绕开 markdown 拒收降级链。
+- **通道自切分**：按 `max_message_len` 用 `channel.Split` 逐片发送；单片失败记该目标失败（首错为准）但继续发余下分片，回执照实。
+- **超时**：整轮投递（所有目标 + 分片）受 `context.WithTimeout(ctx, cfg.Timeout)`（默认 30s）约束。
+- **回执**：`NoticeResult{Target: 完整 openid, Err}`；平台错误（拒收/频控/超长等）原样上报，`/notify` 表现为 `failed` 或 `partial`。
+
+### 14.4 测试
+
+`channel/qq`：首启生成令牌且重启不轮换、文件权限 0600、认领写入目标 + 轮换令牌 + 被动回复确认、错误令牌/同长度异内容令牌/群聊令牌均不认领、容忍大小写与空白、白名单外拒绝认领且不回确认、新账号覆盖旧目标、无目标与空内容返回空结果、主动消息无 `msg_id` 且 `msg_type=0`、超长切分（总字符数不变）、单目标失败如实回报、状态文件损坏报错且不重建、`Manager.All()` 能发现 Noticer 并真实投递。
+
+变异复验（均应变红）：令牌比较恒真、不切分、不轮换令牌——其中「令牌比较恒真」首轮逃逸（错误用例靠长度差异提前返回），补「同长度不同内容」用例后准确拦截。

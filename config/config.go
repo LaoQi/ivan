@@ -416,6 +416,9 @@ func (c *Config) QQEnabled() bool {
 
 func (c *Config) MediaDir() string { return filepath.Join(c.DataDir, "media") }
 
+// QQStatePath 是 QQ 通道自持的状态文件（通知认领令牌与已认领的通知目标）。
+func (c *Config) QQStatePath() string { return filepath.Join(c.DataDir, "qq", "channel.json") }
+
 func (c *Config) JobsDBPath() string {
 	p := strings.TrimSpace(c.Schedule.JobsDB)
 	if p == "" {
