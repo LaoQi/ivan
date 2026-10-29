@@ -36,6 +36,21 @@ func TestManifestSelfDoc(t *testing.T) {
 	if !strings.Contains(out["usage"].(string), "{{base}}/notify") {
 		t.Fatalf("usage 缺占位符: %v", out["usage"])
 	}
+	if !strings.Contains(out["usage"].(string), "no_targets") {
+		t.Fatalf("usage 应说明通知目标的确定方式与 no_targets: %v", out["usage"])
+	}
+	note, _ := first["note"].(string)
+	notifyNote := ""
+	for _, e := range eps {
+		m, _ := e.(map[string]any)
+		if m["name"] == "notify" {
+			notifyNote, _ = m["note"].(string)
+		}
+	}
+	if !strings.Contains(notifyNote, "认领") || !strings.Contains(notifyNote, "no_targets") {
+		t.Fatalf("notify 端点说明应交代目标来源与 no_targets，得到 %q", notifyNote)
+	}
+	_ = note
 }
 
 func TestManifestVersionAndMethod(t *testing.T) {
@@ -72,7 +87,11 @@ func TestGuideEndpoint(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	text := string(body)
-	for _, want := range []string{"POST /notify", "POST /request", "GET /request?session=", "/healthz", "/.well-known/service.json", "/guide.md"} {
+	for _, want := range []string{
+		"POST /notify", "POST /request", "GET /request?session=",
+		"/healthz", "/.well-known/service.json", "/guide.md",
+		"targets[].result", "no_targets", "认领令牌", "20 条/分钟",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("指南缺少 %q", want)
 		}
