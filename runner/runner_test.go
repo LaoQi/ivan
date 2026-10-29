@@ -306,8 +306,8 @@ func TestPoolEvictionSkipsRunningInstance(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Content: "ok"})
 	defer srv.Close()
 	rg := newRig(t, srv)
-	a := rg.r.acquire("cli:a")
-	b := rg.r.acquire("cli:b")
+	a := mustAcquire(t, rg.r, "cli:a")
+	b := mustAcquire(t, rg.r, "cli:b")
 	a.lastUsed = time.Now().Add(-2 * time.Hour)
 	b.lastUsed = time.Now()
 
@@ -330,9 +330,9 @@ func TestMaxAgentsEvictsIdle(t *testing.T) {
 	defer srv.Close()
 	rg := newRig(t, srv)
 	rg.cfg.Runner.MaxAgents = 2
-	rg.r.acquire("cli:a").lastUsed = time.Now().Add(-time.Hour)
-	rg.r.acquire("cli:b").lastUsed = time.Now().Add(-time.Minute)
-	rg.r.acquire("cli:c")
+	mustAcquire(t, rg.r, "cli:a").lastUsed = time.Now().Add(-time.Hour)
+	mustAcquire(t, rg.r, "cli:b").lastUsed = time.Now().Add(-time.Minute)
+	mustAcquire(t, rg.r, "cli:c")
 	if len(rg.r.pool) > 2 {
 		t.Fatalf("池超上限: %d", len(rg.r.pool))
 	}
@@ -458,4 +458,13 @@ func TestRetryOnTransientUpstreamError(t *testing.T) {
 	if !strings.Contains(string(raw), `"kind":"retry"`) || !strings.Contains(string(raw), `"attempt":2`) {
 		t.Fatalf("事件日志缺少 retry 条目或序号: %s", raw)
 	}
+}
+
+func mustAcquire(t *testing.T, r *Runner, key string) *instance {
+	t.Helper()
+	inst, err := r.acquire(key)
+	if err != nil {
+		t.Fatalf("acquire(%s): %v", key, err)
+	}
+	return inst
 }

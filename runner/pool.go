@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -79,6 +80,12 @@ func (i *instance) dequeue() (queuedTurn, bool) {
 	return q, true
 }
 
+func (i *instance) working() bool {
+	i.queueMu.Lock()
+	defer i.queueMu.Unlock()
+	return i.worker
+}
+
 func (i *instance) pending() int {
 	i.queueMu.Lock()
 	defer i.queueMu.Unlock()
@@ -127,20 +134,42 @@ func (i *instance) target() chatTarget {
 	return chatTarget{Channel: i.channel, ChatID: i.chatID, SessionKey: i.sessionKey}
 }
 
-func (r *Runner) acquire(key string) *instance {
+// ErrPoolFull 表示会话实例池已达上限且没有可淘汰的空闲实例。
+var ErrPoolFull = errors.New("会话实例池已达上限且无可回收的空闲实例")
+
+// idelLocked 判定实例是否可回收：既没有回合在跑，也没有排队待处理的消息。
+// 只判锁不够——队列化的实例可能「锁空闲但队列还有活」，淘汰它会话键会再建一个
+// 同工作区的新实例，两个实例并发写同一批会话文件（探针 R11 的覆盖问题）。
+func (i *instance) idleLocked() bool {
+	if !i.mu.TryLock() {
+		return false
+	}
+	i.mu.Unlock()
+	if i.working() {
+		return false
+	}
+	return i.pending() == 0
+}
+
+func (r *Runner) acquire(key string) (*instance, error) {
 	r.poolMu.Lock()
 	if inst, ok := r.pool[key]; ok {
 		inst.lastUsed = time.Now()
 		r.poolMu.Unlock()
-		return inst
+		return inst, nil
 	}
 	if max := r.cfg.Runner.MaxAgents; max > 0 && len(r.pool) >= max {
-		r.evictLocked(0)
+		if n := r.evictLocked(0); n == 0 {
+			size := len(r.pool)
+			r.poolMu.Unlock()
+			r.poolFull.Add(1)
+			return nil, fmt.Errorf("%w（已满 %d 个，全部在跑或有待处理消息）", ErrPoolFull, size)
+		}
 	}
 	inst := &instance{key: key, ws: r.cfg.AgentDir(bus.KeySlug(key)), lastUsed: time.Now()}
 	r.pool[key] = inst
 	r.poolMu.Unlock()
-	return inst
+	return inst, nil
 }
 
 func (r *Runner) evictLocked(idle time.Duration) int {
@@ -153,10 +182,9 @@ func (r *Runner) evictLocked(idle time.Duration) int {
 		if idle > 0 && now.Sub(inst.lastUsed) < idle {
 			continue
 		}
-		if !inst.mu.TryLock() {
+		if !inst.idleLocked() {
 			continue
 		}
-		inst.mu.Unlock()
 		if oldest == nil || inst.lastUsed.Before(oldest.lastUsed) {
 			oldest, oldestKey = inst, key
 		}

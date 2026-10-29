@@ -60,6 +60,7 @@ type Runner struct {
 	cancelled    atomic.Uint64
 	dropped      atomic.Uint64
 	queueDropped atomic.Uint64
+	poolFull     atomic.Uint64
 	inFlight     atomic.Int64
 	closed       atomic.Bool
 
@@ -94,6 +95,7 @@ type Status struct {
 	Continued       uint64        `json:"continued"`
 	DroppedOutbound uint64        `json:"dropped_outbound"`
 	QueueDropped    uint64        `json:"queue_dropped"`
+	PoolFull        uint64        `json:"pool_full"`
 	Hinted          uint64        `json:"hinted"`
 	Forced          uint64        `json:"forced"`
 	Interrupted     uint64        `json:"interrupted"`
@@ -158,7 +160,10 @@ func (r *Runner) submit(ctx context.Context, msg bus.InboundMessage) TurnResult 
 		return TurnResult{Err: errors.New("入站消息内容为空")}
 	}
 	key := bus.SessionKey(msg)
-	inst := r.acquire(key)
+	inst, err := r.acquire(key)
+	if err != nil {
+		return TurnResult{Err: err}
+	}
 	q := queuedTurn{ctx: ctx, msg: msg, done: make(chan TurnResult, 1)}
 	if !inst.enqueue(r, q, r.cfg.Runner.SessionQueue) {
 		r.queueDropped.Add(1)
@@ -507,7 +512,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			go func(m bus.InboundMessage) {
 				defer r.wg.Done()
 				if _, err := r.DispatchTurn(r.turnCtx, m); err != nil {
-					if errors.Is(err, ErrQueueFull) {
+					if errors.Is(err, ErrQueueFull) || errors.Is(err, ErrPoolFull) {
 						r.human(chlog.Event{Kind: "busy", Session: bus.SessionKey(m), Channel: m.Channel, Err: briefErr(err), Failed: true})
 						return
 					}
@@ -574,6 +579,7 @@ func (r *Runner) Status() Status {
 		Continued:       r.continued.Load(),
 		DroppedOutbound: r.dropped.Load(),
 		QueueDropped:    r.queueDropped.Load(),
+		PoolFull:        r.poolFull.Load(),
 		Hinted:          r.hinted.Load(),
 		Forced:          r.forced.Load(),
 		Interrupted:     r.interrupted.Load(),

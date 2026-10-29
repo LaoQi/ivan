@@ -144,4 +144,30 @@ Inbound → runner.dispatch(msg)
 
 **顺带修掉的测试基建缺陷**：`internal/fakellm` 的 `Gate/Hold/Release` 此前是**死代码**（`handle` 里从未读 `s.gate`），导致任何想制造"上游卡住"的用例都拿不到阻塞点。现在 `handle` 在写响应前等待 gate，并响应 `r.Context()` 取消。
 
-**未做**（明确不在本次范围）：跨会话并发槽的公平性（谁先抢到谁先跑，无 FIFO 保证）、`max_agents` 满且无可淘汰实例时仍会继续建实例（池上界问题，见 `runner/pool.go` `acquire`）。
+**未做**（明确不在本次范围）：跨会话并发槽的公平性（谁先抢到谁先跑，无 FIFO 保证）。
+
+## 12 实例池上界修复（2026-10-30）
+
+**问题**：`acquire` 在池满时只**尝试**淘汰一个实例，`evictLocked` 返回 0（没有可淘汰的）时**仍然照常插入**新实例——`runner.max_agents` 实际上没有上限，忙会话一多池就无限增长（每个实例 = 一个 `*agent.Agent` + 一个工作区目录 + sessions/，长期跑会把 `data_dir` 撑大）。
+
+**队列化改造后新增的风险**（§11）：原淘汰条件只判 `inst.mu.TryLock()`（即"锁空闲"）。但队列化的实例可能**锁空闲却队列还有活**（worker 正在取下一个任务），淘汰它会话键会再建一个**同工作区**的新实例，两个实例并发写同一批会话文件——正是探针 R11 记录过的覆盖问题。
+
+**修法**（`runner/pool.go`）：
+
+| 项 | 变化 |
+|---|---|
+| 空闲判定 | 新增 `instance.idleLocked()`：`mu` 可获取 **且** `working()` 为假 **且** `pending() == 0`。队列状态与非队列状态一并纳入 |
+| 上限执行 | `acquire` 改为返回 `(*instance, error)`；池满且 `evictLocked(0)` 返回 0 时返回新增的 `ErrPoolFull`，**不再静默超限** |
+| 计数 | `Status.PoolFull`（`ivan status` 的 runner 行末尾 `pool_full=N`） |
+| 日志 | `Run` 里 `ErrPoolFull` 与 `ErrQueueFull` 同走 `busy` 分支，不计入 `error` |
+| 回收 | `evictLocked` 统一改判 `idleLocked()`，`reap`（闲置回收）与 `acquire`（腾位置）共用同一口径 |
+
+**测试**（`runner/pool_limit_test.go`，变异复验三处全部变红）：
+
+- `TestPoolFullRejectsNewSession`：`max_agents=1`，唯一实例卡在回合里时新会话必须返回 `ErrPoolFull`、池大小仍为 1、`pool_full=1`（变异：恢复"淘汰失败也照插" → 报「满池应返回 ErrPoolFull，实际 <nil>」）。
+- `TestPoolDoesNotEvictInstanceWithQueuedWork`：A 有排队消息、B 在跑时第三个会话进不来，A 不得被淘汰。
+- `TestPoolIdleCheckConsidersQueue`：直接构造「锁空闲 + worker 在 + 队列非空」的状态，断言 `idleLocked()` 为假（变异：只判 `TryLock` → 报「带排队消息（worker 在跑）的实例不应被判为空闲」）。这条是必须的——靠真实回合卡住来验证时 `TryLock` 就先失败了，走不到队列判定。
+- `TestReapSkipsInstanceWithQueuedWork`：闲置回收同样不能动带排队任务的实例（变异：`reap` 改回只判锁 → 报「带排队消息的实例不应被闲置回收，实际回收 1 个」）。
+- `TestPoolEvictsIdleWithWorkerFlagCleared`：反向条件，回合结束、worker 退出、队列为空的实例可被淘汰腾位。
+
+**行为变化（部署需注意）**：`max_agents`（默认 8）从"软上限"变成**硬上限**。并发活跃会话超过该值时，新会话的消息会被丢弃并回 `busy`（`ErrPoolFull`），而不是继续建实例。多来源并发较大（如多个外部服务同时 `/request`）时应调高它。

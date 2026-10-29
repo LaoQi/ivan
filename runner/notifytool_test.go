@@ -39,7 +39,7 @@ func sendToolRig(t *testing.T, sent, total int, names ...string) *noticeRig {
 
 func TestSendMessageToolBroadcast(t *testing.T) {
 	n := sendToolRig(t, 2, 2, "qq:u1", "qq:u2")
-	inst := n.r.acquire("http:ci")
+	inst := mustAcquire(t, n.r, "http:ci")
 	tool := n.r.sendMessageTool(inst)
 	got := tool.Invoke(context.Background(), `{"text":"构建失败已确认，请指示"}`).Text
 	if !strings.HasPrefix(got, "ok:") || !strings.Contains(got, "2 个目标") {
@@ -52,7 +52,7 @@ func TestSendMessageToolBroadcast(t *testing.T) {
 
 func TestSendMessageToolReportsPartialFailure(t *testing.T) {
 	n := sendToolRig(t, 1, 2, "qq:u1")
-	inst := n.r.acquire("http:ci")
+	inst := mustAcquire(t, n.r, "http:ci")
 	got := n.r.sendMessageTool(inst).Invoke(context.Background(), `{"text":"hi"}`).Text
 	if !strings.HasPrefix(got, "partial:") || !strings.Contains(got, "1/2") || !strings.Contains(got, "qq:u1") {
 		t.Fatalf("部分失败应如实汇总: %q", got)
@@ -61,7 +61,7 @@ func TestSendMessageToolReportsPartialFailure(t *testing.T) {
 
 func TestSendMessageToolAllFail(t *testing.T) {
 	n := sendToolRig(t, 0, 2)
-	inst := n.r.acquire("http:ci")
+	inst := mustAcquire(t, n.r, "http:ci")
 	got := n.r.sendMessageTool(inst).Invoke(context.Background(), `{"text":"hi"}`).Text
 	if !strings.HasPrefix(got, "error:") || !strings.Contains(got, "2 个目标") {
 		t.Fatalf("全部失败应报错: %q", got)
@@ -70,7 +70,7 @@ func TestSendMessageToolAllFail(t *testing.T) {
 
 func TestSendMessageToolNoOutlet(t *testing.T) {
 	n := sendToolRig(t, 0, 0)
-	inst := n.r.acquire("http:ci")
+	inst := mustAcquire(t, n.r, "http:ci")
 	got := n.r.sendMessageTool(inst).Invoke(context.Background(), `{"text":"hi"}`).Text
 	if !strings.Contains(got, "没有实现通知出口的通道") {
 		t.Fatalf("无通知出口应明确报错: %q", got)
@@ -84,7 +84,7 @@ func TestSendMessageToolNoOutlet(t *testing.T) {
 
 func TestSendMessageToolValidation(t *testing.T) {
 	n := sendToolRig(t, 1, 1, "qq:u1")
-	inst := n.r.acquire("http:ci")
+	inst := mustAcquire(t, n.r, "http:ci")
 	tool := n.r.sendMessageTool(inst)
 	if got := tool.Invoke(context.Background(), `{"text":"  "}`).Text; !strings.Contains(got, "text 不能为空") {
 		t.Fatalf("空正文应拒绝: %q", got)
