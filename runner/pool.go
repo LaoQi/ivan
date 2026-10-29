@@ -32,6 +32,69 @@ type instance struct {
 
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
+
+	queueMu sync.Mutex
+	queue   []queuedTurn
+	worker  bool
+}
+
+type queuedTurn struct {
+	ctx  context.Context
+	msg  bus.InboundMessage
+	done chan TurnResult
+}
+
+type TurnResult struct {
+	Turn Turn
+	Err  error
+}
+
+func (i *instance) enqueue(r *Runner, q queuedTurn, limit int) bool {
+	i.queueMu.Lock()
+	if limit > 0 && len(i.queue) >= limit {
+		i.queueMu.Unlock()
+		return false
+	}
+	i.queue = append(i.queue, q)
+	start := !i.worker
+	if start {
+		i.worker = true
+	}
+	i.queueMu.Unlock()
+	if start {
+		go i.drain(r)
+	}
+	return true
+}
+
+func (i *instance) dequeue() (queuedTurn, bool) {
+	i.queueMu.Lock()
+	defer i.queueMu.Unlock()
+	if len(i.queue) == 0 {
+		i.worker = false
+		return queuedTurn{}, false
+	}
+	q := i.queue[0]
+	i.queue = i.queue[1:]
+	return q, true
+}
+
+func (i *instance) pending() int {
+	i.queueMu.Lock()
+	defer i.queueMu.Unlock()
+	return len(i.queue)
+}
+
+func (i *instance) drain(r *Runner) {
+	for {
+		q, ok := i.dequeue()
+		if !ok {
+			return
+		}
+		turn, err := r.runQueued(q.ctx, i, q.msg)
+		q.done <- TurnResult{Turn: turn, Err: err}
+		close(q.done)
+	}
 }
 
 func (i *instance) setCancel(fn context.CancelFunc) {

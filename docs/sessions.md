@@ -48,8 +48,10 @@ Inbound → runner.dispatch(msg)
 
 ## 5 并发与背压
 
-- 同 SessionKey 串行；跨 SessionKey 并发上限可配（默认 2）。
-- 会话忙碌时到达的新消息：默认**排队**（每会话队列上限，如 8），超限丢弃并回一条"忙"提示。
+- 同 SessionKey **严格按到达顺序**串行；跨 SessionKey 并发上限可配（默认 2，`daemon.max_concurrent`）。
+- **取并发槽的顺序是硬约束**：先排队（每会话 FIFO 队列，`runner.session_queue` 默认 8）→ 轮到了再取会话锁 → 最后才取跨会话并发槽。**反了就是缺陷**：同一会话的第二条消息会先抢到并发槽、再阻塞等会话锁，`max_concurrent=2` 时同会话连发两条即可占满两个槽、其他会话全部堵死（2026-10-30 修，见 §11）。
+- 队列上限 `runner.session_queue`（默认 8，`0`/负值回落默认）：超限**不静默吞掉**——`DispatchTurn` 返回 `ErrQueueFull`、计 `queue_dropped`（`status` 可见）、人类日志记一行 `busy`，总线层不再重复计丢弃。
+- **同会话顺序由队列保证**，不依赖 goroutine 抢锁：旧实现里两条消息谁先进 `DispatchTurn` 取决于调度，顺序不确定。
 - 运行中任务的取消（**已实现**）：`ivan cancel <会话键>` 走 socket → `runner.CancelTurn(key)` 取消该会话当前回合的 ctx（agent 支持 ctx 取消，`run_shell` 子进程按 tanya 既有语义处理）；没有在跑的回合时明确报错。
 - 停机：SIGTERM → 停止入站 → 等在跑回合收尾（超时则取消）→ 刷出站 → 落状态。
 
@@ -111,3 +113,35 @@ Inbound → runner.dispatch(msg)
    - **崩溃回合 `interrupted` 标记**：`state.json` 增 `running{<会话键>: {session,channel,chat_id,started_at}}`，`DispatchTurn` 开始 `BeginTurn`、结束 `EndTurn`（原子写）。启动时 `recoverInterrupted()` 用 `DrainRunning()` 清残留并逐条记事件 `turn_interrupted`（人类日志同名行）+ `Status.interrupted` 计数；该会话**下一次回合**在 `Ask` 前 `AppendNotice` 注入"上次回合因进程退出中断、结果未知、先核对实际进展"的提示（只注入一次）。进程被 `SIGKILL`/OOM 后重启即可看到，不再靠猜。文件：`data/state.go`、`runner/runner.go`、`runner/recover_test.go`、`data/filetail_test.go`。
    - **记忆文件自动裁剪**：`runner.memory_max_bytes`（默认 **0 = 不裁剪**）。回合结束后按行边界保留最新内容到上限，文件头加一行 `<!-- 记忆已裁剪 <日期>：只保留最近 N 字节（原 M 字节） -->`，`0600` 原子写；裁剪量记事件 `memory_trim`。实现 `data.TrimFileTail`。
    - **按会话的工作区白名单**：**判定不适用**——会话工作区恒为 `<data_dir>/agents/<key-slug>/`，ivan 未向模型暴露任何切换工作区的工具（`tools.Standard` 只有 `run_shell`/`read_image`/内建），"指定低风险工作区"实际靠 `data_dir` 与项目目录配置。若将来暴露工作区切换能力，再补白名单。
+
+## 11 并发槽语义修复（2026-10-30）
+
+**问题**：`Runner.Run` 与 `Runner.TriggerJob` 都是**先抢跨会话并发槽**（`r.sem`），再进 `DispatchTurn` 内部拿会话实例锁（`inst.mu`）。同一会话的第二条消息因此会：
+
+1. 先占住一个并发槽（`max_concurrent` 默认 2，直接吃掉一半额度）；
+2. 再阻塞在 `inst.mu` 上等同会话的前一轮跑完。
+
+`max_concurrent=2` 时，同一会话连发两条消息即可把两个槽全占满，**其他所有会话被无限期堵死**。另外同会话的顺序靠 goroutine 抢锁决定，**不保证按到达顺序执行**。
+
+这是早期设计缺陷：把"跨会话并发"与"会话内串行"两层闸门的获取顺序搞反了。会话内排队是逻辑上的第一层，并发槽是第二层。
+
+**修法**（`runner/pool.go`、`runner/runner.go`、`config`）：
+
+| 项 | 变化 |
+|---|---|
+| 会话内排队 | `instance` 增 FIFO 队列 `queue []queuedTurn` + 单 worker（`drain`）。`enqueue` 只登记并唤醒 worker（`worker` 标志保证每实例最多一个 worker），`dequeue` 取队头 |
+| 获取顺序 | `runQueued` 先 `inst.mu.Lock()`，**之后**才 `r.sem <- struct{}{}`；`Run` / `TriggerJob` 外层不再抢槽 |
+| 顺序保证 | 同会话严格 FIFO，不再依赖 goroutine 调度 |
+| 队列上限 | `runner.session_queue`（默认 8）：超限返回新增的 `ErrQueueFull`、计 `queue_dropped`、日志记 `busy`；`Run` 里对 `ErrQueueFull` 单独分支（不计入 `error`） |
+| 可观测 | `Status.QueueDropped`，`ivan status` 的 runner 行末尾 `queue_dropped=N` |
+| 停机 | `submit` 等待结果时同时监听 `r.turnCtx`，停机时立即返回而不是等队列 |
+
+**测试**（`runner/queue_test.go`，变异复验三处全部变红）：
+
+- `TestQueuedMessageDoesNotHoldSem`：`max_concurrent=2`，A 会话首回合卡在上游；A 的第二条消息**不得**让 B 会话被堵（新实现下假服务端收到 2 个请求，旧实现只收到 1 个）。
+- `TestSameSessionFIFOOrder`：第一条在跑时再顺序投递两条（队列长度 > 1，LIFO 与 FIFO 才会不同），三个请求的 user 文本必须依次为第一、第二、第三问。
+- `TestQueueFullDropsAndCounts`：`session_queue=1`，第三条必须**立即**被拒并返回 `ErrQueueFull`、`queue_dropped=1`（无上限时会一直挂起，用例自带 3s 超时判定）。
+
+**顺带修掉的测试基建缺陷**：`internal/fakellm` 的 `Gate/Hold/Release` 此前是**死代码**（`handle` 里从未读 `s.gate`），导致任何想制造"上游卡住"的用例都拿不到阻塞点。现在 `handle` 在写响应前等待 gate，并响应 `r.Context()` 取消。
+
+**未做**（明确不在本次范围）：跨会话并发槽的公平性（谁先抢到谁先跑，无 FIFO 保证）、`max_agents` 满且无可淘汰实例时仍会继续建实例（池上界问题，见 `runner/pool.go` `acquire`）。

@@ -34,6 +34,7 @@ const (
 	DefaultShutdownSeconds    = 30
 	DefaultSendSeconds        = 60
 	DefaultMaxAgents          = 8
+	DefaultSessionQueue       = 8
 	DefaultIdleMinutes        = 30
 	DefaultJobsDB             = "jobs.db"
 	DefaultJobTimeoutSeconds  = 900
@@ -57,6 +58,7 @@ type RunnerConfig struct {
 	MaxTokensPerDay    int  `yaml:"max_tokens_per_day"`
 	MemoryMaxBytes     int  `yaml:"memory_max_bytes"`
 	MaxAgents          int  `yaml:"max_agents"`
+	SessionQueue       int  `yaml:"session_queue"`
 	IdleTimeoutMinutes int  `yaml:"idle_timeout_minutes"`
 	Stream             bool `yaml:"stream"`
 	StreamFirstSeconds int  `yaml:"stream_first_seconds"`
@@ -294,6 +296,9 @@ func (c *Config) normalize() {
 	}
 	if c.Runner.MaxAgents <= 0 {
 		c.Runner.MaxAgents = DefaultMaxAgents
+	}
+	if c.Runner.SessionQueue <= 0 {
+		c.Runner.SessionQueue = DefaultSessionQueue
 	}
 	if c.Runner.IdleTimeoutMinutes <= 0 {
 		c.Runner.IdleTimeoutMinutes = DefaultIdleMinutes

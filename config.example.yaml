@@ -47,6 +47,8 @@ runner:
   memory_max_bytes: 0
   # 会话实例池上限（超出时淘汰最久未用的空闲实例）
   max_agents: 8
+  # 单会话待处理队列上限（同一会话的消息按到达顺序串行；超出丢弃并回“忙”，计入 status queue_dropped）
+  session_queue: 8
   # 空闲实例回收时间（分钟）
   idle_timeout_minutes: 30
   # 中间态投递（默认开）：整条回复只占一条消息，通道支持流式时原位更新，

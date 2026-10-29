@@ -135,6 +135,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"error":{"message":"mock failure"}}`)
 		return
 	}
+	s.mu.Lock()
+	gate := s.gate
+	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	if s.delay > 0 {

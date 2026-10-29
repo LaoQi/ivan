@@ -31,6 +31,9 @@ type Options struct {
 	Paused func() bool
 }
 
+// ErrQueueFull 表示该会话的待处理队列已满，消息被丢弃（不静默计入总线丢弃）。
+var ErrQueueFull = errors.New("会话待处理队列已满，消息已丢弃")
+
 type Turn struct {
 	Session     string
 	Tokens      int
@@ -46,18 +49,19 @@ type Runner struct {
 	pool   map[string]*instance
 	sem    chan struct{}
 
-	startedAt   time.Time
-	turns       atomic.Uint64
-	failures    atomic.Uint64
-	handoffs    atomic.Uint64
-	continued   atomic.Uint64
-	hinted      atomic.Uint64
-	forced      atomic.Uint64
-	interrupted atomic.Uint64
-	cancelled   atomic.Uint64
-	dropped     atomic.Uint64
-	inFlight    atomic.Int64
-	closed      atomic.Bool
+	startedAt    time.Time
+	turns        atomic.Uint64
+	failures     atomic.Uint64
+	handoffs     atomic.Uint64
+	continued    atomic.Uint64
+	hinted       atomic.Uint64
+	forced       atomic.Uint64
+	interrupted  atomic.Uint64
+	cancelled    atomic.Uint64
+	dropped      atomic.Uint64
+	queueDropped atomic.Uint64
+	inFlight     atomic.Int64
+	closed       atomic.Bool
 
 	wg          sync.WaitGroup
 	turnCtx     context.Context
@@ -89,6 +93,7 @@ type Status struct {
 	Handoffs        uint64        `json:"handoffs"`
 	Continued       uint64        `json:"continued"`
 	DroppedOutbound uint64        `json:"dropped_outbound"`
+	QueueDropped    uint64        `json:"queue_dropped"`
 	Hinted          uint64        `json:"hinted"`
 	Forced          uint64        `json:"forced"`
 	Interrupted     uint64        `json:"interrupted"`
@@ -138,17 +143,50 @@ func (r *Runner) Dispatch(ctx context.Context, msg bus.InboundMessage) error {
 	return err
 }
 
+// DispatchTurn 把一个入站消息排进所属会话的队列并等待该回合结果。
+// 排队发生在取并发槽之前：同一会话的消息按到达顺序串行，不占跨会话并发额度。
 func (r *Runner) DispatchTurn(ctx context.Context, msg bus.InboundMessage) (Turn, error) {
+	res := r.submit(ctx, msg)
+	return res.Turn, res.Err
+}
+
+func (r *Runner) submit(ctx context.Context, msg bus.InboundMessage) TurnResult {
 	if r.closed.Load() {
-		return Turn{}, errors.New("runner 已关闭")
+		return TurnResult{Err: errors.New("runner 已关闭")}
 	}
 	if strings.TrimSpace(msg.Content) == "" && len(msg.Media) == 0 {
-		return Turn{}, errors.New("入站消息内容为空")
+		return TurnResult{Err: errors.New("入站消息内容为空")}
 	}
 	key := bus.SessionKey(msg)
 	inst := r.acquire(key)
+	q := queuedTurn{ctx: ctx, msg: msg, done: make(chan TurnResult, 1)}
+	if !inst.enqueue(r, q, r.cfg.Runner.SessionQueue) {
+		r.queueDropped.Add(1)
+		r.note("queue_full", key)
+		return TurnResult{Err: ErrQueueFull}
+	}
+	select {
+	case res := <-q.done:
+		return res
+	case <-r.turnCtx.Done():
+		return TurnResult{Err: errors.New("runner 正在停机")}
+	}
+}
+
+// runQueued 在队列 worker 中真正执行一个回合：先取会话锁（同键串行由队列保证顺序），
+// 再取跨会话并发槽——顺序反了就会让排队的同键消息白占并发额度。
+func (r *Runner) runQueued(ctx context.Context, inst *instance, msg bus.InboundMessage) (Turn, error) {
+	key := inst.key
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
+	select {
+	case r.sem <- struct{}{}:
+	case <-r.turnCtx.Done():
+		return Turn{}, errors.New("runner 正在停机")
+	case <-ctx.Done():
+		return Turn{}, ctx.Err()
+	}
+	defer func() { <-r.sem }()
 	inst.lastUsed = time.Now()
 	inst.turns++
 	inst.setTarget(replyChannel(msg), msg.ChatID, key)
@@ -423,14 +461,6 @@ func (r *Runner) TriggerJob(ctx context.Context, t schedule.Trigger) schedule.Ou
 	if r.closed.Load() {
 		return schedule.Outcome{Err: errors.New("runner 已关闭")}
 	}
-	select {
-	case r.sem <- struct{}{}:
-	case <-r.turnCtx.Done():
-		return schedule.Outcome{Err: errors.New("runner 正在停机")}
-	case <-ctx.Done():
-		return schedule.Outcome{Err: ctx.Err()}
-	}
-	defer func() { <-r.sem }()
 	prompt := t.Prompt
 	if file := strings.TrimSpace(t.File); file != "" {
 		content, path, err := r.ReadTaskFile(file)
@@ -476,13 +506,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.wg.Add(1)
 			go func(m bus.InboundMessage) {
 				defer r.wg.Done()
-				select {
-				case r.sem <- struct{}{}:
-				case <-r.turnCtx.Done():
-					return
-				}
-				defer func() { <-r.sem }()
 				if _, err := r.DispatchTurn(r.turnCtx, m); err != nil {
+					if errors.Is(err, ErrQueueFull) {
+						r.human(chlog.Event{Kind: "busy", Session: bus.SessionKey(m), Channel: m.Channel, Err: briefErr(err), Failed: true})
+						return
+					}
 					r.human(chlog.Event{Kind: "error", Session: bus.SessionKey(m), Channel: m.Channel, Err: briefErr(err), Failed: true})
 				}
 			}(msg)
@@ -545,6 +573,7 @@ func (r *Runner) Status() Status {
 		Handoffs:        r.handoffs.Load(),
 		Continued:       r.continued.Load(),
 		DroppedOutbound: r.dropped.Load(),
+		QueueDropped:    r.queueDropped.Load(),
 		Hinted:          r.hinted.Load(),
 		Forced:          r.forced.Load(),
 		Interrupted:     r.interrupted.Load(),

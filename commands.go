@@ -672,9 +672,10 @@ func printStatus(st daemon.Status) {
 		st.Bus.Outbound, st.Bus.OutboundDropped, st.Bus.OutboundQueued, lastDrop(st.Bus))
 	fmt.Printf("events    written=%d dropped=%d %s\n", st.Events.Written, st.Events.Dropped, st.Events.Dir)
 	fmt.Printf("logs      lines=%d errors=%d %s\n", st.Logs.Lines, st.Logs.Errors, st.Logs.Path)
-	fmt.Printf("runner    turns=%d failures=%d handoffs=%d continued=%d hints=%d inflight=%d agents=%d/%d sessions=%d concurrent=%d\n",
+	fmt.Printf("runner    turns=%d failures=%d handoffs=%d continued=%d hints=%d inflight=%d agents=%d/%d sessions=%d concurrent=%d queue_dropped=%d\n",
 		st.Runner.Turns, st.Runner.Failures, st.Runner.Handoffs, st.Runner.Continued, st.Runner.Hinted,
-		st.Runner.InFlight, st.Runner.Agents, st.Runner.MaxAgents, st.Runner.Sessions, st.Runner.MaxConcurrent)
+		st.Runner.InFlight, st.Runner.Agents, st.Runner.MaxAgents, st.Runner.Sessions, st.Runner.MaxConcurrent,
+		st.Runner.QueueDropped)
 	budget := "不限"
 	if st.Runner.MaxTokensPerDay > 0 {
 		budget = strconv.Itoa(st.Runner.MaxTokensPerDay)
