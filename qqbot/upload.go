@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -18,6 +19,72 @@ const (
 	inlineUploadLimit = 5 << 20
 	md5WindowBytes    = 10002432
 )
+
+type FileType int
+
+const (
+	FileImage FileType = 1
+	FileVideo FileType = 2
+	FileVoice FileType = 3
+	FileFile  FileType = 4
+)
+
+func (t FileType) valid() bool { return t >= FileImage && t <= FileFile }
+
+func (t FileType) String() string {
+	switch t {
+	case FileImage:
+		return "图片"
+	case FileVideo:
+		return "视频"
+	case FileVoice:
+		return "语音"
+	case FileFile:
+		return "文件"
+	default:
+		return "未知"
+	}
+}
+
+// SoftLimit 返回官方软限制（字节）。超过软限制时平台会把富媒体降级为文件类型上传。
+func (t FileType) SoftLimit() int64 {
+	switch t {
+	case FileImage, FileVoice:
+		return 20 << 20
+	case FileVideo:
+		return 30 << 20
+	case FileFile:
+		return 200 << 20
+	default:
+		return 0
+	}
+}
+
+// DetectFileType 按 MIME 与扩展名判定 file_type：图片/视频/语音之外一律按文件发送
+// （官方对 file_type=4 不限制格式，客户端展示为可下载的文件卡片）。
+func DetectFileType(name, mimeType string) FileType {
+	mt := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch {
+	case strings.HasPrefix(mt, "image/"):
+		return FileImage
+	case strings.HasPrefix(mt, "video/"):
+		return FileVideo
+	case strings.HasPrefix(mt, "audio/"):
+		return FileVoice
+	}
+	if mt != "" && mt != "application/octet-stream" {
+		return FileFile
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+		return FileImage
+	case ".mp4":
+		return FileVideo
+	case ".silk", ".slk", ".mp3", ".wav", ".ogg":
+		return FileVoice
+	}
+	return FileFile
+}
 
 type uploadPart struct {
 	Index        int     `json:"index"`
@@ -31,22 +98,34 @@ type prepareResult struct {
 	Parts     []uploadPart `json:"parts"`
 }
 
-func (c *Client) UploadImage(ctx context.Context, target Target, name string, data []byte) (string, error) {
+// UploadFile 上传一份富媒体并返回 file_info（用于 msg_type=7 的 media.file_info）。
+// ≤5MB 内联 base64，>5MB 走四步分片。
+func (c *Client) UploadFile(ctx context.Context, target Target, name string, data []byte, ft FileType) (string, error) {
 	if !target.valid() {
 		return "", errNoTarget
 	}
+	if !ft.valid() {
+		return "", fmt.Errorf("qqbot 不支持的 file_type: %d", int(ft))
+	}
 	if len(data) == 0 {
-		return "", fmt.Errorf("qqbot 图片内容为空")
+		return "", fmt.Errorf("qqbot 上传内容为空")
+	}
+	if name == "" {
+		name = "file"
 	}
 	if len(data) <= inlineUploadLimit {
-		return c.uploadInline(ctx, target, name, data)
+		return c.uploadInline(ctx, target, name, data, ft)
 	}
-	return c.uploadChunked(ctx, target, name, data)
+	return c.uploadChunked(ctx, target, name, data, ft)
 }
 
-func (c *Client) uploadInline(ctx context.Context, target Target, name string, data []byte) (string, error) {
+func (c *Client) UploadImage(ctx context.Context, target Target, name string, data []byte) (string, error) {
+	return c.UploadFile(ctx, target, name, data, FileImage)
+}
+
+func (c *Client) uploadInline(ctx context.Context, target Target, name string, data []byte, ft FileType) (string, error) {
 	raw, err := c.uploadRequest(ctx, target, map[string]any{
-		"file_type":    1,
+		"file_type":    int(ft),
 		"file_name":    name,
 		"file_data":    encodeBase64(data),
 		"srv_send_msg": false,
@@ -57,13 +136,13 @@ func (c *Client) uploadInline(ctx context.Context, target Target, name string, d
 	return fileInfoOf(raw)
 }
 
-func (c *Client) uploadChunked(ctx context.Context, target Target, name string, data []byte) (string, error) {
-	uploadID, err := c.uploadPrepare(ctx, target, name, data)
+func (c *Client) uploadChunked(ctx context.Context, target Target, name string, data []byte, ft FileType) (string, error) {
+	uploadID, err := c.uploadPrepare(ctx, target, name, data, ft)
 	if err != nil {
 		return "", err
 	}
 	raw, err := c.uploadRequest(ctx, target, map[string]any{
-		"file_type":    1,
+		"file_type":    int(ft),
 		"file_name":    name,
 		"upload_id":    uploadID,
 		"srv_send_msg": false,
@@ -74,7 +153,7 @@ func (c *Client) uploadChunked(ctx context.Context, target Target, name string, 
 	return fileInfoOf(raw)
 }
 
-func (c *Client) uploadPrepare(ctx context.Context, target Target, name string, data []byte) (string, error) {
+func (c *Client) uploadPrepare(ctx context.Context, target Target, name string, data []byte, ft FileType) (string, error) {
 	whole := md5.Sum(data)
 	sum := sha1.Sum(data)
 	window := data
@@ -83,7 +162,7 @@ func (c *Client) uploadPrepare(ctx context.Context, target Target, name string, 
 	}
 	part10 := md5.Sum(window)
 	payload := map[string]any{
-		"file_type": 1,
+		"file_type": int(ft),
 		"file_size": fmt.Sprintf("%d", len(data)),
 		"file_name": name,
 		"md5":       hex.EncodeToString(whole[:]),

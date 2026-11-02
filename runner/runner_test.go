@@ -468,3 +468,22 @@ func mustAcquire(t *testing.T, r *Runner, key string) *instance {
 	}
 	return inst
 }
+func TestPromptOfMediaVariants(t *testing.T) {
+	msg := bus.InboundMessage{
+		Channel: "qq", ChatID: "u",
+		Media: []bus.MediaRef{
+			{Path: "/tmp/a.pdf", MIME: "application/pdf", Name: "a.pdf", Bytes: 10},
+			{Name: "big.bin", MIME: "application/octet-stream", Bytes: 99999999},
+		},
+	}
+	got := promptOf(msg)
+	if !strings.Contains(got, "run_shell") {
+		t.Fatalf("非图片附件应提示 run_shell: %q", got)
+	}
+	if strings.Contains(got, "read_image") {
+		t.Fatalf("非图片附件不应提示 read_image: %q", got)
+	}
+	if !strings.Contains(got, "超过缓存上限") {
+		t.Fatalf("未落盘附件应说明原因: %q", got)
+	}
+}

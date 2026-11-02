@@ -709,3 +709,106 @@ func TestMarkdownSentCounter(t *testing.T) {
 		t.Fatalf("文本发送不应计入 markdown，得到 %d", got)
 	}
 }
+
+func TestUploadFileTypePropagated(t *testing.T) {
+	cases := []struct {
+		name string
+		ft   FileType
+	}{
+		{"a.png", FileImage},
+		{"a.mp4", FileVideo},
+		{"a.silk", FileVoice},
+		{"a.pdf", FileFile},
+	}
+	for _, tc := range cases {
+		f := newFakeGateway(t)
+		c, h := startClient(t, f)
+		<-h.ready
+		info, err := c.UploadFile(context.Background(), Target{UserOpenID: "u-1"}, tc.name, []byte("data"), tc.ft)
+		if err != nil {
+			t.Fatalf("%s UploadFile: %v", tc.name, err)
+		}
+		if info != "fi-1" {
+			t.Fatalf("%s file_info 期望 fi-1，得到 %q", tc.name, info)
+		}
+		f.mu.Lock()
+		uploads := append([]map[string]any(nil), f.fileUploads...)
+		f.mu.Unlock()
+		if len(uploads) != 1 {
+			t.Fatalf("%s 应有一次上传，得到 %d", tc.name, len(uploads))
+		}
+		if uploads[0]["file_type"] != float64(tc.ft) {
+			t.Fatalf("%s file_type 期望 %d，得到 %v", tc.name, tc.ft, uploads[0]["file_type"])
+		}
+		if uploads[0]["file_name"] != tc.name {
+			t.Fatalf("%s file_name 未透传: %v", tc.name, uploads[0]["file_name"])
+		}
+	}
+}
+
+func TestUploadFileRejectsInvalidInput(t *testing.T) {
+	c := &Client{cfg: Config{}.withDefaults()}
+	if _, err := c.UploadFile(context.Background(), Target{}, "a.png", []byte("x"), FileImage); err == nil {
+		t.Fatal("缺目标应报错")
+	}
+	if _, err := c.UploadFile(context.Background(), Target{UserOpenID: "u-1"}, "a.png", nil, FileImage); err == nil {
+		t.Fatal("空内容应报错")
+	}
+	if _, err := c.UploadFile(context.Background(), Target{UserOpenID: "u-1"}, "a.png", []byte("x"), FileType(9)); err == nil {
+		t.Fatal("非法 file_type 应报错")
+	}
+}
+
+func TestDetectFileType(t *testing.T) {
+	cases := []struct {
+		name string
+		mime string
+		want FileType
+	}{
+		{"a.png", "image/png", FileImage},
+		{"a.bin", "image/jpeg; charset=x", FileImage},
+		{"a.mp4", "video/mp4", FileVideo},
+		{"a.bin", "video/quicktime", FileVideo},
+		{"a.silk", "audio/silk", FileVoice},
+		{"a.bin", "audio/ogg", FileVoice},
+		{"a.pdf", "application/pdf", FileFile},
+		{"a.csv", "text/csv", FileFile},
+		{"a.png", "", FileImage},
+		{"a.mp4", "", FileVideo},
+		{"a.mp3", "", FileVoice},
+		{"a.txt", "", FileFile},
+		{"noext", "application/octet-stream", FileFile},
+	}
+	for _, tc := range cases {
+		if got := DetectFileType(tc.name, tc.mime); got != tc.want {
+			t.Fatalf("DetectFileType(%q,%q) 期望 %d，得到 %d", tc.name, tc.mime, tc.want, got)
+		}
+	}
+}
+
+func TestSendMediaCarriesFileInfo(t *testing.T) {
+	f := newFakeGateway(t)
+	c, h := startClient(t, f)
+	<-h.ready
+	id, err := c.SendMedia(context.Background(), Target{UserOpenID: "u-1"}, "fi-xyz", "m-1", 2)
+	if err != nil {
+		t.Fatalf("SendMedia: %v", err)
+	}
+	if id != "msg-out-1" {
+		t.Fatalf("消息 id 期望 msg-out-1，得到 %q", id)
+	}
+	call, ok := f.lastSend()
+	if !ok {
+		t.Fatal("没有发送请求")
+	}
+	if call.Body["msg_type"] != float64(MsgTypeMedia) {
+		t.Fatalf("msg_type 应为 7: %+v", call.Body)
+	}
+	media, _ := call.Body["media"].(map[string]any)
+	if media["file_info"] != "fi-xyz" {
+		t.Fatalf("media.file_info 错误: %+v", media)
+	}
+	if call.Body["msg_seq"] != float64(2) {
+		t.Fatalf("msg_seq 应为 2: %+v", call.Body)
+	}
+}

@@ -95,6 +95,8 @@ type QQConfig struct {
 	Typing          bool     `yaml:"typing"`
 	AllowProactive  bool     `yaml:"allow_proactive"`
 	ReconnectMaxSec int      `yaml:"reconnect_max_sec"`
+	MediaMaxMB      int      `yaml:"media_max_mb"`
+	FileMaxMB       int      `yaml:"file_max_mb"`
 }
 
 type HTTPRequestConfig struct {
@@ -179,7 +181,7 @@ func Default() *Config {
 			CLI: CLIConfig{Enabled: true, Stream: true},
 			QQ: QQConfig{
 				MaxMessageLen: 2048, Markdown: true, Stream: true, StreamMaxLen: 2048, Typing: true,
-				ReconnectMaxSec: 60,
+				ReconnectMaxSec: 60, MediaMaxMB: 20, FileMaxMB: 200,
 			},
 		},
 		Schedule: ScheduleConfig{
@@ -323,6 +325,15 @@ func (c *Config) normalize() {
 	}
 	if c.Channels.QQ.StreamMaxLen <= 0 {
 		c.Channels.QQ.StreamMaxLen = 2048
+	}
+	if c.Channels.QQ.MediaMaxMB <= 0 {
+		c.Channels.QQ.MediaMaxMB = 20
+	}
+	if c.Channels.QQ.FileMaxMB <= 0 {
+		c.Channels.QQ.FileMaxMB = 200
+	}
+	if c.Channels.QQ.FileMaxMB < c.Channels.QQ.MediaMaxMB {
+		c.Channels.QQ.FileMaxMB = c.Channels.QQ.MediaMaxMB
 	}
 	if strings.TrimSpace(c.Schedule.JobsDB) == "" {
 		c.Schedule.JobsDB = DefaultJobsDB

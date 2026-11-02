@@ -25,6 +25,7 @@ const (
 	DefaultStreamLen  = 2048
 	DefaultTypingSecs = 60
 	DefaultMediaMB    = 20
+	DefaultFileMB     = 200
 )
 
 const (
@@ -50,6 +51,7 @@ type Config struct {
 	ReconnectMax   time.Duration
 	MediaDir       string
 	MediaMaxBytes  int64
+	FileMaxBytes   int64
 	Timeout        time.Duration
 	StatePath      string
 	UserAgent      string
@@ -86,6 +88,12 @@ func New(cfg Config) (*Channel, error) {
 	}
 	if cfg.MediaMaxBytes <= 0 {
 		cfg.MediaMaxBytes = int64(DefaultMediaMB) << 20
+	}
+	if cfg.FileMaxBytes <= 0 {
+		cfg.FileMaxBytes = int64(DefaultFileMB) << 20
+	}
+	if cfg.FileMaxBytes < cfg.MediaMaxBytes {
+		cfg.FileMaxBytes = cfg.MediaMaxBytes
 	}
 	if cfg.StreamMaxLen <= 0 {
 		cfg.StreamMaxLen = DefaultStreamLen
@@ -354,12 +362,20 @@ func (c *Channel) fetchMedia(ev qqbot.MessageEvent) []bus.MediaRef {
 	}
 	refs := make([]bus.MediaRef, 0, len(ev.Attachments))
 	for i, att := range ev.Attachments {
-		if strings.TrimSpace(att.URL) == "" {
+		url := strings.TrimSpace(att.URL)
+		if url == "" {
+			url = strings.TrimSpace(att.VoiceWavURL)
+		}
+		if url == "" {
 			continue
 		}
-		ref, err := c.downloadAttachment(ev, att, i)
+		ref, err := c.downloadAttachment(ev, att, url, i)
 		if err != nil {
-			c.cfg.Logf("qq 附件下载失败: %v", err)
+			c.cfg.Logf("qq 附件下载失败 filename=%s: %v", att.Filename, err)
+			continue
+		}
+		if ref.Path == "" {
+			refs = append(refs, ref)
 			continue
 		}
 		refs = append(refs, ref)
@@ -367,11 +383,18 @@ func (c *Channel) fetchMedia(ev qqbot.MessageEvent) []bus.MediaRef {
 	return refs
 }
 
-func (c *Channel) downloadAttachment(ev qqbot.MessageEvent, att qqbot.Attachment, idx int) (bus.MediaRef, error) {
+// downloadAttachment 落盘入站附件。超过上限时不落盘，只回一条带字节数的占位
+// （Path 为空），避免把被截断的坏文件交给模型。
+func (c *Channel) downloadAttachment(ev qqbot.MessageEvent, att qqbot.Attachment, url string, idx int) (bus.MediaRef, error) {
+	name := mediaName(ev.ID, att, idx)
+	origName := attachmentName(att, name)
+	if att.Size > c.cfg.FileMaxBytes {
+		return bus.MediaRef{Name: origName, MIME: attachmentMIME(att, name), Bytes: att.Size}, nil
+	}
 	if err := os.MkdirAll(c.cfg.MediaDir, 0o700); err != nil {
 		return bus.MediaRef{}, err
 	}
-	req, err := http.NewRequest(http.MethodGet, att.URL, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return bus.MediaRef{}, err
 	}
@@ -383,13 +406,16 @@ func (c *Channel) downloadAttachment(ev qqbot.MessageEvent, att qqbot.Attachment
 	if resp.StatusCode != http.StatusOK {
 		return bus.MediaRef{}, fmt.Errorf("下载附件 HTTP %d", resp.StatusCode)
 	}
-	name := mediaName(ev.ID, att, idx)
 	path := filepath.Join(c.cfg.MediaDir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return bus.MediaRef{}, err
 	}
-	n, err := io.Copy(f, io.LimitReader(resp.Body, c.cfg.MediaMaxBytes))
+	limit := c.cfg.FileMaxBytes
+	if limit <= 0 {
+		limit = int64(DefaultFileMB) << 20
+	}
+	n, err := io.Copy(f, io.LimitReader(resp.Body, limit+1))
 	cerr := f.Close()
 	if err != nil {
 		_ = os.Remove(path)
@@ -398,11 +424,34 @@ func (c *Channel) downloadAttachment(ev qqbot.MessageEvent, att qqbot.Attachment
 	if cerr != nil {
 		return bus.MediaRef{}, cerr
 	}
-	mime := att.ContentType
-	if mime == "" {
-		mime = mimeFromExt(filepath.Ext(name))
+	if n > limit {
+		_ = os.Remove(path)
+		return bus.MediaRef{Name: origName, MIME: attachmentMIME(att, name), Bytes: n}, nil
 	}
-	return bus.MediaRef{Path: path, MIME: mime, Name: name, Bytes: n}, nil
+	return bus.MediaRef{Path: path, MIME: attachmentMIME(att, name), Name: origName, Bytes: n}, nil
+}
+
+// attachmentMIME 处理官方附件里的伪 MIME（voice / file 不是真的 MIME），
+// 落盘文件名带扩展名时按扩展名补真实类型。
+func attachmentMIME(att qqbot.Attachment, stored string) string {
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(att.ContentType, ";")[0]))
+	switch {
+	case ct == "" || ct == "file":
+		return mimeFromExt(filepath.Ext(stored))
+	case ct == "voice":
+		if att.VoiceWavURL != "" {
+			return "audio/wav"
+		}
+		return "audio/silk"
+	}
+	return att.ContentType
+}
+
+func attachmentName(att qqbot.Attachment, stored string) string {
+	if name := strings.TrimSpace(att.Filename); name != "" {
+		return filepath.Base(name)
+	}
+	return stored
 }
 
 func mediaName(id string, att qqbot.Attachment, idx int) string {
@@ -429,6 +478,12 @@ func extFromContentType(ct string) string {
 		return ".gif"
 	case "image/webp":
 		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "voice":
+		return ".wav"
+	case "file":
+		return ".bin"
 	default:
 		return ""
 	}
@@ -444,6 +499,22 @@ func mimeFromExt(ext string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".mp4":
+		return "video/mp4"
+	case ".wav":
+		return "audio/wav"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".silk", ".slk":
+		return "audio/silk"
+	case ".ogg":
+		return "audio/ogg"
+	case ".txt":
+		return "text/plain"
+	case ".pdf":
+		return "application/pdf"
+	case ".zip":
+		return "application/zip"
 	default:
 		return "application/octet-stream"
 	}
@@ -458,6 +529,13 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	content := strings.TrimSpace(msg.Content)
 	if content == "" && len(msg.Media) == 0 {
 		return nil
+	}
+	need := len(msg.Media)
+	if content != "" {
+		need++
+	}
+	if err := c.checkQuota(msg.ReplyTo, group, need); err != nil {
+		return err
 	}
 	if content != "" {
 		seq, replyTo, err := c.nextSeq(msg.ReplyTo, group)
@@ -477,9 +555,22 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.client.SendImage(ctx, target, fileInfo, replyTo, seq); err != nil {
+		if _, err := c.client.SendMedia(ctx, target, fileInfo, replyTo, seq); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkQuota 在发之前核对被动回复额度：一条正文 + 每个附件各占一次，
+// 额度不够就整条拒绝，不留"正文发出去了、文件没发出去"的半成品。
+func (c *Channel) checkQuota(replyTo string, group bool, need int) error {
+	if need <= 0 || c.cfg.AllowProactive {
+		return nil
+	}
+	if left := c.remaining(replyTo, group); left < need {
+		return fmt.Errorf("qq 被动回复额度不足：本次需要 %d 次，剩余 %d 次（msg_id=%s）；可开 allow_proactive 或减少附件",
+			need, left, shortID(strings.TrimSpace(replyTo)))
 	}
 	return nil
 }
@@ -508,20 +599,32 @@ func (c *Channel) sendBody(ctx context.Context, target qqbot.Target, content, re
 
 func (c *Channel) upload(ctx context.Context, target qqbot.Target, ref bus.MediaRef) (string, error) {
 	if strings.TrimSpace(ref.Path) == "" {
-		return "", errors.New("qq 图片缺少本地路径")
+		return "", errors.New("qq 附件缺少本地路径")
 	}
-	data, err := os.ReadFile(ref.Path)
+	info, err := os.Stat(ref.Path)
 	if err != nil {
 		return "", err
 	}
-	if int64(len(data)) > c.cfg.MediaMaxBytes {
-		return "", fmt.Errorf("图片超过 %d 字节上限", c.cfg.MediaMaxBytes)
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("qq 附件不是普通文件: %s", ref.Path)
 	}
 	name := strings.TrimSpace(ref.Name)
 	if name == "" {
 		name = filepath.Base(ref.Path)
 	}
-	return c.client.UploadImage(ctx, target, name, data)
+	ft := qqbot.DetectFileType(name, ref.MIME)
+	if ft != qqbot.FileFile && (info.Size() > ft.SoftLimit() || info.Size() > c.cfg.MediaMaxBytes) {
+		ft = qqbot.FileFile
+	}
+	if info.Size() > c.cfg.FileMaxBytes {
+		return "", fmt.Errorf("qq 附件 %s 为 %d 字节，超过%s上限 %d 字节", name, info.Size(), ft, c.cfg.FileMaxBytes)
+	}
+
+	data, err := os.ReadFile(ref.Path)
+	if err != nil {
+		return "", err
+	}
+	return c.client.UploadFile(ctx, target, name, data, ft)
 }
 
 func (c *Channel) resolveTarget(msg bus.OutboundMessage) (qqbot.Target, bool) {

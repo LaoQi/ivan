@@ -117,7 +117,9 @@ func (c *Client) SendMarkdown(ctx context.Context, target Target, markdown strin
 	return out, err
 }
 
-func (c *Client) SendImage(ctx context.Context, target Target, fileInfo string, replyTo string, seq int) (string, error) {
+// SendMedia 发送富媒体消息（msg_type=7）：图片/视频/语音/文件都走这一条，
+// 形态由上传时的 file_type 决定。
+func (c *Client) SendMedia(ctx context.Context, target Target, fileInfo string, replyTo string, seq int) (string, error) {
 	if strings.TrimSpace(fileInfo) == "" {
 		return "", fmt.Errorf("qqbot file_info 为空")
 	}

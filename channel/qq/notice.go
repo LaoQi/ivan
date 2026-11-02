@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LaoQi/ivan/bus"
 	"github.com/LaoQi/ivan/channel"
 	"github.com/LaoQi/ivan/qqbot"
 )
@@ -223,6 +224,48 @@ func (c *Channel) Notice(ctx context.Context, content string) []channel.NoticeRe
 	return out
 }
 
+// NoticeFiles 把本地文件发给通知目标：正文先发，附件逐个上传后以富媒体消息发出。
+// 一个目标上任何一步失败都记该目标失败并继续下一片/下一个附件，回执照实。
+func (c *Channel) NoticeFiles(ctx context.Context, content string, files []bus.MediaRef) []channel.NoticeResult {
+	text := strings.TrimSpace(content)
+	if text == "" && len(files) == 0 {
+		return nil
+	}
+	targets := c.state.targets()
+	if len(targets) == 0 {
+		return nil
+	}
+	dctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
+	defer cancel()
+	parts := channel.Split(text, c.cfg.MaxMessageLen)
+	out := make([]channel.NoticeResult, 0, len(targets))
+	for _, openid := range targets {
+		out = append(out, channel.NoticeResult{
+			Target: openid,
+			Err:    c.noticeFilesTo(dctx, openid, parts, files),
+		})
+	}
+	return out
+}
+
+func (c *Channel) noticeFilesTo(ctx context.Context, openid string, parts []string, files []bus.MediaRef) error {
+	target := qqbot.Target{UserOpenID: openid}
+	err := c.noticeTo(ctx, openid, parts)
+	for _, ref := range files {
+		fileInfo, ferr := c.upload(ctx, target, ref)
+		if ferr == nil {
+			_, ferr = c.client.SendMedia(ctx, target, fileInfo, "", 0)
+		}
+		if ferr != nil {
+			c.cfg.Logf("qq 通知附件投递失败 target=%s file=%s: %v", shortID(openid), ref.Name, ferr)
+			if err == nil {
+				err = ferr
+			}
+		}
+	}
+	return err
+}
+
 func (c *Channel) noticeTo(ctx context.Context, openid string, parts []string) error {
 	target := qqbot.Target{UserOpenID: openid}
 	var firstErr error
@@ -291,4 +334,7 @@ func (c *Channel) initState() {
 	}
 }
 
-var _ channel.Noticer = (*Channel)(nil)
+var (
+	_ channel.Noticer     = (*Channel)(nil)
+	_ channel.FileNoticer = (*Channel)(nil)
+)

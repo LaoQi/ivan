@@ -139,6 +139,8 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 			AllowProactive: cfg.Channels.QQ.AllowProactive,
 			ReconnectMax:   time.Duration(cfg.Channels.QQ.ReconnectMaxSec) * time.Second,
 			MediaDir:       cfg.MediaDir(),
+			MediaMaxBytes:  int64(cfg.Channels.QQ.MediaMaxMB) << 20,
+			FileMaxBytes:   int64(cfg.Channels.QQ.FileMaxMB) << 20,
 			StatePath:      cfg.QQStatePath(),
 			UserAgent:      config.UserAgent(d.version),
 			Logf:           func(format string, args ...any) { _ = d.human.Notice(format, args...) },
@@ -197,14 +199,15 @@ func New(cfg *config.Config, version string, out io.Writer) (*Daemon, error) {
 		}
 	}
 	r, err := runner.New(runner.Options{
-		Cfg:    cfg,
-		Log:    events,
-		Human:  d.human,
-		State:  state,
-		Bus:    d.bus,
-		Notify: func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
-		Notice: d.noticeSummary,
-		Paused: d.paused,
+		Cfg:       cfg,
+		Log:       events,
+		Human:     d.human,
+		State:     state,
+		Bus:       d.bus,
+		Notify:    func(ctx context.Context, m bus.OutboundMessage) error { return d.mgr.Route(ctx, m) },
+		Notice:    d.noticeSummary,
+		SendFiles: d.filesSummary,
+		Paused:    d.paused,
 	})
 	if err != nil {
 		d.Release()
@@ -472,6 +475,51 @@ func (d *Daemon) broadcastNotice(ctx context.Context, content string) []httpchan
 		out = append(out, httpchan.TargetResult{Name: "-", Channel: "-", Result: "no_targets", Error: "没有实现通知出口的通道"})
 	}
 	return out
+}
+
+// broadcastFiles 是带附件的通知广播：只有实现了 FileNoticer 的通道参与，
+// 回执口径与 broadcastNotice 一致（逐目标如实回报）。
+func (d *Daemon) broadcastFiles(ctx context.Context, text string, files []bus.MediaRef) []httpchan.TargetResult {
+	var out []httpchan.TargetResult
+	for _, ch := range d.mgr.All() {
+		n, ok := ch.(channel.FileNoticer)
+		if !ok {
+			out = append(out, httpchan.TargetResult{Name: ch.Name(), Channel: ch.Name(), Result: "no_targets", Error: "通道不支持发送附件"})
+			continue
+		}
+		results := n.NoticeFiles(ctx, text, files)
+		if len(results) == 0 {
+			out = append(out, httpchan.TargetResult{Name: ch.Name(), Channel: ch.Name(), Result: "no_targets", Error: "通道当前没有可投递目标"})
+			continue
+		}
+		for _, r := range results {
+			tr := httpchan.TargetResult{Name: ch.Name() + ":" + r.Target, Channel: ch.Name(), Result: "sent"}
+			if r.Err != nil {
+				tr.Result = "failed"
+				tr.Error = bus.OneLine(r.Err.Error(), 128)
+			}
+			out = append(out, tr)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, httpchan.TargetResult{Name: "-", Channel: "-", Result: "no_targets", Error: "没有支持附件投递的通道"})
+	}
+	return out
+}
+
+func (d *Daemon) filesSummary(ctx context.Context, text string, files []bus.MediaRef) (int, int, string) {
+	results := d.broadcastFiles(ctx, text, files)
+	sent, failed := 0, 0
+	var names []string
+	for _, r := range results {
+		if r.Result == "sent" {
+			sent++
+			names = append(names, r.Name)
+		} else {
+			failed++
+		}
+	}
+	return sent, len(results), strings.Join(names, ", ")
 }
 
 func (d *Daemon) noticeSummary(ctx context.Context, content string) (int, int, string) {

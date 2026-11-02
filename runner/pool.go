@@ -258,6 +258,9 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 		list = append(list, r.scheduleTool(inst))
 	}
 	list = append(list, r.sendMessageTool(inst))
+	if r.opts.SendFiles != nil {
+		list = append(list, r.sendFileTool(inst))
+	}
 	ag, err = agent.New(&r.cfg.Config,
 		agent.WithSystemPrompt(prompt.System(prompt.Info{
 			Workspace: inst.ws,

@@ -47,6 +47,12 @@ type Noticer interface {
 	Notice(ctx context.Context, content string) []NoticeResult
 }
 
+// FileNoticer 是通道的可选能力：通知时附上本地文件（图片、文档等）。
+// 实现该能力的通道自己决定上传形态与失败处理，调用方只给路径，不指定目标。
+type FileNoticer interface {
+	NoticeFiles(ctx context.Context, text string, files []bus.MediaRef) []NoticeResult
+}
+
 // NoticeResult 是一次通知在通道内一个目标上的结果。
 type NoticeResult struct {
 	Target string
@@ -256,9 +262,12 @@ func (m *Manager) Route(ctx context.Context, msg bus.OutboundMessage) error {
 		firstErr error
 		failed   int
 	)
-	for _, part := range parts {
+	for i, part := range parts {
 		out := msg
 		out.Content = part
+		if i > 0 {
+			out.Media = nil
+		}
 		err := m.deliver(dctx, c, out)
 		switch {
 		case err == nil:

@@ -115,6 +115,8 @@ type Attachment struct {
 	Size        int64  `json:"size,omitempty"`
 	Width       int    `json:"width,omitempty"`
 	Height      int    `json:"height,omitempty"`
+	VoiceWavURL string `json:"voice_wav_url,omitempty"`
+	ASRRefer    string `json:"asr_refer_text,omitempty"`
 }
 
 type MessageEvent struct {

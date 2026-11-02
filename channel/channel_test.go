@@ -294,3 +294,31 @@ func TestRouteSplitterEmptyFallsBack(t *testing.T) {
 		t.Fatalf("应回退通用切分器得到 2 条，得到 %d", got)
 	}
 }
+
+func TestRouteAttachesMediaOnlyOnce(t *testing.T) {
+	b := bus.New(4, 4)
+	m := New(b, WithRetries(1))
+	f := &fakeChannel{name: "md", maxLen: 2}
+	if err := m.Register(f); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	media := []bus.MediaRef{{Path: "/tmp/a.png", MIME: "image/png"}}
+	err := m.Route(context.Background(), bus.OutboundMessage{
+		Channel: "md", Content: "一二三四五六", Media: media,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	msgs := f.messages()
+	if len(msgs) != 3 {
+		t.Fatalf("应切分为 3 条，得到 %d", len(msgs))
+	}
+	if len(msgs[0].Media) != 1 {
+		t.Fatalf("首片应携带附件: %+v", msgs[0].Media)
+	}
+	for i := 1; i < len(msgs); i++ {
+		if len(msgs[i].Media) != 0 {
+			t.Fatalf("第 %d 片不应重复携带附件: %+v", i+1, msgs[i].Media)
+		}
+	}
+}

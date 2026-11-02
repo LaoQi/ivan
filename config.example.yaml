@@ -134,6 +134,10 @@ channels:
     typing: true
     # 被动回复窗口用尽后是否允许转为主动消息（平台频控 + 用户可关闭）
     allow_proactive: false
+    # 图片/语音/视频单文件上限（MB，官方软限制：图片 20、视频 30、语音 20；视频与文件共用下面一项）
+    media_max_mb: 20
+    # 文件（file_type=4，任意格式）与视频的单文件上限（MB，官方软限制 200，硬限制同值）
+    file_max_mb: 200
     # 通知目标不在此配置：QQ 通道首启生成认领令牌（日志可见，落 <data_dir>/qq/channel.json），
     # 用本人 QQ 私聊机器人发送该令牌即把该账号设为通知目标，令牌随之轮换并写回该文件
     # （通知正文与普通出站同规则：含 markdown 语法且 markdown 开启时走 msg_type=2，被拒则回退纯文本）

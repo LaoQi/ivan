@@ -290,3 +290,91 @@ QQ 通道实现 `channel.Noticer`（`Notice(ctx, content) []channel.NoticeResult
 `channel/qq`：首启生成令牌且重启不轮换、文件权限 0600、认领写入目标 + 轮换令牌 + 被动回复确认、错误令牌/同长度异内容令牌/群聊令牌均不认领、容忍大小写与空白、白名单外拒绝认领且不回确认、新账号覆盖旧目标、无目标与空内容返回空结果、无语法正文走 `msg_type=0`、含语法走 `msg_type=2` 且主动消息不带 `msg_id`/`msg_seq`、markdown 拒收后回退纯文本、开关关闭仍走纯文本、超长切分（总字符数不变）、单目标失败如实回报、状态文件损坏报错且不重建、`Manager.All()` 能发现 Noticer 并真实投递。
 
 变异复验（均应变红）：令牌比较恒真、不切分、不轮换令牌、通知退回 `SendText`（不走 markdown 链路）、`msg_seq` 无条件写入——其中「令牌比较恒真」首轮逃逸（错误用例靠长度差异提前返回），补「同长度不同内容」用例后准确拦截。
+
+## 15 文件与富媒体出站（2026-11-02）
+
+首期只把 `bus.MediaRef` 当图片发（`file_type` 写死 `1`、上限 20MB）。本节把出站扩成官方支持的四类富媒体，并补上「模型主动把文件发给用户」的通路。
+
+### 15.1 官方能力（文档站点 v1.46.0 核对）
+
+`file_type` 只这四档，`msg_type` 一律 `7` + `media.file_info`，**一条消息只能带一个 media**：
+
+| `file_type` | 类型 | 格式 | 软限制 | 硬限制 |
+|---|---|---|---|---|
+| `1` | 图片 | png/jpg/gif/webp/bmp | 20MB | 200MB |
+| `2` | 视频 | mp4 | 30MB | 200MB |
+| `3` | 语音 | silk/mp3/wav/ogg | 20MB | 200MB |
+| `4` | 文件 | 任意格式（客户端展示文件卡片可下载） | 200MB | 200MB |
+
+- **超软限制会被平台降级为文件类型上传**，超硬限制报错（`upload 超过大小限制`）。
+- 上传三路不变：`file_data`（base64，≤5MB）/ `url` / 四步分片（`upload_prepare` → 逐片 `PUT` → `upload_part_finish` → `files` 合并）。
+- 单聊与群聊的上传接口（含 `upload_prepare`/`upload_part_finish`）**互不通用**，已按目标分别拼路径。
+- 被动回复额度按**条消息**计（单聊 60 分钟/4 次、群 5 分钟/5 次）：正文 + N 个附件 = N+1 条，批量发附件极易超限。
+
+### 15.2 协议层（`qqbot/upload.go`）
+
+- 新增 `FileType`（`FileImage`/`FileVideo`/`FileVoice`/`FileFile` = 官方 1/2/3/4）与 `SoftLimit()`。
+- 唯一入口 `UploadFile(ctx, target, name, data, ft)`；`UploadImage` 保留为 `ft=FileImage` 的薄包装（旧测试不动）。
+  内联/分片两条路径都把 `ft` 透传到 `files` 与 `upload_prepare` 的 `file_type`。
+- `DetectFileType(name, mime)`：`image/*`→1、`video/*`→2、`audio/*`→3，MIME 缺失或为 `application/octet-stream` 时按扩展名兜底，其余→4。
+- `SendImage` 更名 `SendMedia`（语义本就是「富媒体」，`msg_type=7`），调用方只有 `channel/qq` 一处。
+
+### 15.3 适配器（`channel/qq`）
+
+- `upload()` 先 `os.Stat` 校验**普通文件**、按 `DetectFileType` 定类型，超该类型软限制或超 `media_max_mb` 时**主动降级为 `file_type=4`**（不必等平台降级，展示形态可预期），超 `file_max_mb` 直接报错（不发残文件）。
+- **额度前置核对**：`Send` 先算「正文 + 附件」需要几次被动回复，不够就**整条拒绝**并给出所需/剩余次数，避免"正文发出去了、文件没发出去"的半成品。
+- 入站附件：`Attachment` 补官方字段 `voice_wav_url`/`asr_refer_text`；`voice`/`file` 这类**伪 MIME** 按 wav URL 与扩展名补成真实类型（`audio/wav`/`audio/silk`/`application/pdf`…）。
+  超过 `file_max_mb` 时**不落盘**，只回一条带字节数的占位（`MediaRef.Path` 为空）——原实现用 `io.LimitReader` 截断，会把半个坏文件交给模型。
+- 配置：`media_max_mb`（默认 20，图片/语音/视频）与 `file_max_mb`（默认 **200**，文件与视频）。两者都按官方软限制取值。
+
+### 15.4 模型侧通路：`send_file`
+
+- 新增可选能力 `channel.FileNoticer`（`NoticeFiles(ctx, text, files) []NoticeResult`），`channel/qq` 实现：先发正文，再逐个上传并以 `msg_type=7` 主动消息发出（不带 `msg_id`/`msg_seq`）；任一附件失败记该目标失败但继续，回执照实。
+- `daemon.broadcastFiles` 遍历实现该能力的通道，逐目标回执（与 `broadcastNotice` 同口径：`sent`/`failed`/`no_targets`）；`runner.Options.SendFiles` 接线。
+- `runner/sendfiletool.go` 提供工具 `send_file`：参数 `paths`（**1–3 个**）+ 可选 `text`；只提交路径、**不指定收件人**（沿用"模型不能指定目标"的约束）。
+  校验：路径存在、非目录、是普通文件、可读；相对路径相对当前工作区；重复路径去重。
+  返回 `ok`/`partial`/`error`，失败原因如实回给模型。
+- `promptOf`（入站提示）按 MIME 分述：图片提示 `read_image`，其余提示 `run_shell`；未落盘（超限）的附件写明"超过缓存上限，未保存到本地"。
+
+### 15.5 顺带修掉的一个既有缺陷
+
+`channel.Manager.Route` 切分长文本时沿用原消息（含 `Media`），**每个分片都带附件** → 一张图被重复发 N 次（白烧被动额度，单聊只有 4 次）。现在只在**首片**保留 `Media`，其余置空。
+
+### 15.6 测试
+
+`qqbot`：`file_type` 四类透传、`DetectFileType` 13 组判定、非法 `file_type`/空内容/缺目标拒绝、`SendMedia` 的 `msg_type`/`file_info`/`msg_seq`。
+`channel/qq`：csv 按 `file_type=4` 上传、五类扩展名判定、超限报错且不发任何请求、额度不足整条拒绝、目录被拒、伪 MIME 补齐、超限附件不落盘、语音附件（`voice_wav_url`）落盘、`NoticeFiles` 正/负/无目标三类回执。
+`runner`：`send_file` 引用透传、相对路径解析、路径不存在/目录拒绝、数量上限、去重与失败如实回报、无出口时报错；`promptOf` 图片/非图片/未落盘三种描述。
+`daemon`：附件广播逐目标回执、无支持通道时如实 `no_targets`、`filesSummary` 计数。
+`channel`：切分只在首片带 `Media`。
+
+变异复验（均准确变红）：去掉额度前置核对、`file_type` 写死图片、去掉去重、去掉数量上限、切分每片都带 `Media`、`NoticeFiles` 吞掉附件错误。
+
+## 16 待扩展项（2026-11-02 规划，未实施）
+
+按价值排序，供后续选取。**尚未实现**，不要按已交付引用。
+
+### 16.1 P1（与常驻后台代理直接相关）
+
+1. **入站事件扩充**：`C2C_MSG_REJECT`/`C2C_MSG_RECEIVE`（用户关/开主动消息推送）、`GROUP_MSG_REJECT`/`RECEIVE`、`GROUP_ADD_ROBOT`/`DEL_ROBOT`、`FRIEND_ADD`。
+   价值：把"用户已拒收主动消息"写进通道状态文件，`/notify` 回执能解释失败原因（而不是只报 `40054013`）；机器人被拉群/踢群可记事件。
+2. **消息撤回**：`DELETE /v2/{users|groups}/{openid}/messages/{message_id}`（2 分钟内）。通道内保存近期已发消息 id（有上限的环形表）+ 工具（如 `recall_last`）。价值：发错/发了敏感内容能自救。
+3. **主动消息配额记账**：官方每用户/每群 1000 条/天，当前完全没计。可在通道内按天计数、`ivan status` 可见，接近上限时不再尝试。
+
+### 16.2 P2（出站形态）
+
+4. **markdown 内嵌图片（素材管理）**：`POST /v2/media-images/prepare` → `PUT` → `POST /v2/media-images/complete` 拿 `qqbot-media://image/v1/<token>`（单张 ≤10MB、单机器人 100 张、90 天滑动过期、`GET /v2/media-images` 查询、`DELETE /v2/media-images/{id}/delete` 释放）。
+   现状 `md.go` 把本地图片降级成「[图片: alt]」文字；有了这个可以真正渲染，且比 `msg_type=7` 省被动额度。
+5. **图文卡片 `msg_type=8`**：`tuwen` 卡（`title` 1–50、`description` 1–200、`url`/`pic_url` 须 https 且 ≤1024 字符）。适合做通知/日报的富卡片。
+6. **内嵌键盘 + `INTERACTION_CREATE`**：`keyboard` 按钮（`action.type`：0 跳转 / 1 回调 / 2 指令），回调类需 `PUT /interactions/{interaction_id}` 回应（仅 button type 11 与快捷菜单 12 必须回应，超时失效）；被动回复可用事件 id（`event_id` 支持 `INTERACTION_CREATE` 等）。
+   工作量最大：新事件类型 + 事件 id 复用被动回复 + 一次回应限制。可做"一键确认/取消"，配合审批类场景（注意：回合内挂起等审批仍是未解问题，见 `docs/plan.md`）。
+
+### 16.3 P3（低优先）
+
+7. **引用回复** `message_reference`：入站取 `message_scene.ext` 的 `msg_idx`，机器人自己的消息取出站响应 `ext_info.ref_idx`。
+8. **群消息全量模式** `GROUP_MESSAGE_CREATE`：需额外权限，注意别打扰群；与"只在被 @ 时处理"的现状冲突，需按配置开关。
+9. **群管理类**（群信息/成员列表/禁言/黑名单/入群审批）：与 agent 定位弱相关，不建议做。
+
+### 16.4 不做
+
+频道（guild）、模板卡片/ARK、语音转写（无本地 ASR，只能把 wav 路径交给模型自行处理）。

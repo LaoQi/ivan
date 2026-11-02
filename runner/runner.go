@@ -20,15 +20,16 @@ import (
 )
 
 type Options struct {
-	Cfg    *config.Config
-	Log    *data.EventLog
-	Human  *chlog.Sink
-	State  *data.State
-	Bus    *bus.Bus
-	Stream io.Writer
-	Notify func(ctx context.Context, msg bus.OutboundMessage) error
-	Notice func(ctx context.Context, content string) (sent, total int, names string)
-	Paused func() bool
+	Cfg       *config.Config
+	Log       *data.EventLog
+	Human     *chlog.Sink
+	State     *data.State
+	Bus       *bus.Bus
+	Stream    io.Writer
+	Notify    func(ctx context.Context, msg bus.OutboundMessage) error
+	Notice    func(ctx context.Context, content string) (sent, total int, names string)
+	SendFiles func(ctx context.Context, text string, files []bus.MediaRef) (sent, total int, names string)
+	Paused    func() bool
 }
 
 // ErrQueueFull 表示该会话的待处理队列已满，消息被丢弃（不静默计入总线丢弃）。
@@ -672,15 +673,27 @@ func promptOf(msg bus.InboundMessage) string {
 		b.WriteString(text)
 		b.WriteString("\n\n")
 	}
-	fmt.Fprintf(&b, "用户发送了 %d 个附件（本地已缓存，可用 read_image 查看）：\n", len(msg.Media))
+	fmt.Fprintf(&b, "用户发送了 %d 个附件：\n", len(msg.Media))
 	for i, m := range msg.Media {
 		label := m.Name
 		if label == "" {
 			label = fmt.Sprintf("附件%d", i+1)
 		}
-		fmt.Fprintf(&b, "- %s（%s，%d 字节）：%s\n", label, m.MIME, m.Bytes, m.Path)
+		if m.Path == "" {
+			fmt.Fprintf(&b, "- %s（%s，%d 字节）：超过缓存上限，未保存到本地\n", label, m.MIME, m.Bytes)
+			continue
+		}
+		if isImageMIME(m.MIME) {
+			fmt.Fprintf(&b, "- %s（%s，%d 字节）：%s，可用 read_image 查看\n", label, m.MIME, m.Bytes, m.Path)
+			continue
+		}
+		fmt.Fprintf(&b, "- %s（%s，%d 字节）：%s，可用 run_shell 处理\n", label, m.MIME, m.Bytes, m.Path)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func isImageMIME(mimeType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "image/")
 }
 
 func (t *task) run(ctx context.Context) error {
