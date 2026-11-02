@@ -350,31 +350,38 @@ QQ 通道实现 `channel.Noticer`（`Notice(ctx, content) []channel.NoticeResult
 
 变异复验（均准确变红）：去掉额度前置核对、`file_type` 写死图片、去掉去重、去掉数量上限、切分每片都带 `Media`、`NoticeFiles` 吞掉附件错误。
 
-## 16 待扩展项（2026-11-02 规划，未实施）
+## 16 剩余扩展项评估结论：均不做（2026-11-02 评估）
 
-按价值排序，供后续选取。**尚未实现**，不要按已交付引用。
+§16 原为「待扩展项」清单（入站事件扩充、消息撤回、主动配额记账、素材图片、图文卡片、内嵌键盘、引用回复、群全量、群管理）。**评估结论：一项都不做**，本节只留官方事实与不做理由，供将来重启时省一遍调研。**不要按已交付引用**。
 
-### 16.1 P1（与常驻后台代理直接相关）
+判定口径：只按「对无人值守后台代理的实际收益 / 成本」计，不按平台能力丰富度计。已交付的通知主线（`/notify`、`send_message`、`send_file`）不依赖以下任何一项。
 
-1. **入站事件扩充**：`C2C_MSG_REJECT`/`C2C_MSG_RECEIVE`（用户关/开主动消息推送）、`GROUP_MSG_REJECT`/`RECEIVE`、`GROUP_ADD_ROBOT`/`DEL_ROBOT`、`FRIEND_ADD`。
-   价值：把"用户已拒收主动消息"写进通道状态文件，`/notify` 回执能解释失败原因（而不是只报 `40054013`）；机器人被拉群/踢群可记事件。
-2. **消息撤回**：`DELETE /v2/{users|groups}/{openid}/messages/{message_id}`（2 分钟内）。通道内保存近期已发消息 id（有上限的环形表）+ 工具（如 `recall_last`）。价值：发错/发了敏感内容能自救。
-3. **主动消息配额记账**：官方每用户/每群 1000 条/天，当前完全没计。可在通道内按天计数、`ivan status` 可见，接近上限时不再尝试。
+### 16.1 逐项判定
 
-### 16.2 P2（出站形态）
+官方事实均为 2026-11-02 从文档站（v1.46.0）重新抓取核对，不是旧结论转抄。
 
-4. **markdown 内嵌图片（素材管理）**：`POST /v2/media-images/prepare` → `PUT` → `POST /v2/media-images/complete` 拿 `qqbot-media://image/v1/<token>`（单张 ≤10MB、单机器人 100 张、90 天滑动过期、`GET /v2/media-images` 查询、`DELETE /v2/media-images/{id}/delete` 释放）。
-   现状 `md.go` 把本地图片降级成「[图片: alt]」文字；有了这个可以真正渲染，且比 `msg_type=7` 省被动额度。
-5. **图文卡片 `msg_type=8`**：`tuwen` 卡（`title` 1–50、`description` 1–200、`url`/`pic_url` 须 https 且 ≤1024 字符）。适合做通知/日报的富卡片。
-6. **内嵌键盘 + `INTERACTION_CREATE`**：`keyboard` 按钮（`action.type`：0 跳转 / 1 回调 / 2 指令），回调类需 `PUT /interactions/{interaction_id}` 回应（仅 button type 11 与快捷菜单 12 必须回应，超时失效）；被动回复可用事件 id（`event_id` 支持 `INTERACTION_CREATE` 等）。
-   工作量最大：新事件类型 + 事件 id 复用被动回复 + 一次回应限制。可做"一键确认/取消"，配合审批类场景（注意：回合内挂起等审批仍是未解问题，见 `docs/plan.md`）。
+| 项 | 官方事实（本轮核对） | 判定 | 理由 |
+|---|---|---|---|
+| **入站事件扩充**（`C2C_MSG_REJECT`/`RECEIVE`、`GROUP_MSG_REJECT`/`RECEIVE`、`GROUP_ADD_ROBOT`/`DEL_ROBOT`、`FRIEND_ADD`/`DEL`） | 全部在 `GROUP_AND_C2C_EVENT (1<<25)`，已订阅；事件体只有 `openid` / `group_openid` / `op_member_openid` / `timestamp` | 不做 | 唯一收益是把「用户关了主动推送」写进状态文件、让通知回执多一句解释。但 `Notice` 本就是 best-effort、失败已原样上报平台错误（`40054013`/`40054004`/`40034100`），再加一层本地陈旧状态反而可能与真实状态不一致（事件会丢、状态会过期），收益不抵复杂度 |
+| **`event_id` 被动问候**（`FRIEND_ADD`/`GROUP_ADD_ROBOT`/`C2C_MSG_RECEIVE` 可用 `event_id` 被动回复） | 单聊 `event_id` 支持 `INTERACTION_CREATE`/`C2C_MSG_RECEIVE`/`FRIEND_ADD`；群聊支持 `INTERACTION_CREATE`/`GROUP_ADD_ROBOT`/`GROUP_MSG_RECEIVE` | 不做 | 「加好友自动回一句欢迎语」属产品话术，不是能力缺口；有人真要用时问一句就行，不必预埋 |
+| **消息撤回** | `DELETE /v2/{users\|groups}/{openid}/messages/{message_id}`，**超 2 分钟不可撤**（`40064004`）；群聊仅群管理员可撤他人消息（否则 `40062003`） | 不做 | 窗口只有 2 分钟：等模型发现发错、用户回一句「撤掉」，窗口基本已过。前置还得先把出站消息 id 打通（当前全丢弃）并加环形表 + 新工具，成本明显大于收益 |
+| **主动消息配额记账**（1000 条/天/用户·群） | 单聊/群聊均「每关系 1 天最多 1000 条」，超限 `40034100` | 不做 | 个人自用场景日通知量级是「几条」，撞不到 1000；本地计数只能是近似（跨实例、跨进程、平台侧口径都不同），做出来是个会误判的仪表 |
+| **素材图片（markdown 内嵌）** | `prepare`→`PUT`→`complete` 拿 `qqbot-media://image/v1/<token>`；单张 ≤10MB、仅 png/jpeg/gif/webp、**扩展名须与 `Content-Type` 一致**、100 张/机器人、**90 天滑动过期**（每次引用顺延）、`prepare` 的 `upload_id` 仅 4 小时、`GET /v2/media-images?cursor=` 分页、`DELETE /v2/media-images/{id}/delete` | 不做 | 不是新能力，只是把「本地图片降级成 `[图片: alt]` 文字」升级成真渲染。代价是 qqbot 新增一个模块 + 通道侧缓存（文件→`image_id`）+ 100 张淘汰策略 + 90 天过期追踪；`send_file` 已经能把图发给用户，排版收益不抵 |
+| **图文卡片 `msg_type=8`**（`tuwen`） | `card.type=tuwen`，`content` 需 `title`(1–50)、`description`(1–200)、`url` 与 `pic_url` 都**必须 https 且 ≤1024 字符** | 不做 | 拦在 `pic_url` 必须是公网 https：ivan 产出的图表都是本地文件，没有公网图床就永远拼不出合法卡片，等于只能发「无图卡片」 |
+| **内嵌键盘 + `INTERACTION_CREATE`** | 事件在 `INTERACTION (1<<26)`（**需单独申请权限**，未获权限时 identify 直接报错断连）；`PUT /interactions/{id}` 回应，仅 `type=11`（消息按钮）与 `type=12`（快捷菜单）必须回，同一 id 只能回一次；`code` 0/1/2/3/4/5 | 不做 | 价值完全取决于「回合可挂起 + 答复可关联」，而这两条已明确不做（`docs/plan.md` D12）。剩下的 `action.type=2` 指令按钮等价于「让用户打字」，等于没做。另外还要多申请一个 intent 权限，权限被收回会导致整条 WS 连不上 |
+| **引用回复 `message_reference`** | 入站取 `message_scene.ext` 的 `msg_idx`，自己发的消息取响应 `ext_info.ref_idx` | 不做 | 纯视觉，会话内本来就有上下文 |
+| **群消息全量 `GROUP_MESSAGE_CREATE`** | 同属 `1<<25`，需在机器人侧开启「接收所有消息」 | 不做（且方向相反） | 群里每句话都进回合 = 烧 token + 噪音；与「只在被 @ 时处理」的现有语义冲突 |
+| **群管理类**（`bot_state`/`info`/成员/黑名单/入群审批） | `/info`、`/bot_state` 等**仅白名单机器人可用**（`11253`） | 不做 | 与 agent 定位弱相关，且个人机器人拿不到权限 |
 
-### 16.3 P3（低优先）
+### 16.2 重启条件
 
-7. **引用回复** `message_reference`：入站取 `message_scene.ext` 的 `msg_idx`，机器人自己的消息取出站响应 `ext_info.ref_idx`。
-8. **群消息全量模式** `GROUP_MESSAGE_CREATE`：需额外权限，注意别打扰群；与"只在被 @ 时处理"的现状冲突，需按配置开关。
-9. **群管理类**（群信息/成员列表/禁言/黑名单/入群审批）：与 agent 定位弱相关，不建议做。
+上述任一项要重启，前置条件写死在这里，避免又从零调研：
 
-### 16.4 不做
+- **撤回**：确实出现「2 分钟内撤回」的真实需求，且愿意接受先补出站消息 id 记账。
+- **素材图片**：真机确认「markdown 里的图片降级成文字」确实是痛点，且愿意承担 100 张上限的淘汰策略。
+- **内嵌键盘**：**必须**先有「回合可挂起 + 答复可关联」（`docs/plan.md` D12 前置），否则不做。
+- **配额记账**：真撞过 `40034100`。
+
+### 16.3 明确不做（与本节独立）
 
 频道（guild）、模板卡片/ARK、语音转写（无本地 ASR，只能把 wav 路径交给模型自行处理）。
