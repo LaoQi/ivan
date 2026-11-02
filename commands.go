@@ -751,3 +751,129 @@ func lastLine(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	return lines[len(lines)-1]
 }
+
+func cmdSessions(args []string) int {
+	f, err := parseArgs(args, "json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	cfg, code := loadConfig()
+	if cfg == nil {
+		return code
+	}
+	sub := "list"
+	var key string
+	if len(f.rest) > 0 {
+		sub = f.rest[0]
+	}
+	if len(f.rest) > 1 {
+		key = strings.Join(f.rest[1:], " ")
+	}
+	if len(f.rest) > 2 {
+		usageSessions()
+		return 1
+	}
+	switch sub {
+	case "list", "ls":
+		return sessionsList(cfg, f.bools["json"])
+	case "new", "rotate":
+		if strings.TrimSpace(key) == "" {
+			usageSessions()
+			return 1
+		}
+		return sessionsNew(cfg, key)
+	default:
+		usageSessions()
+		return 1
+	}
+}
+
+func usageSessions() {
+	fmt.Fprintln(os.Stderr, "用法:\n  ivan sessions [list] [--json]\n  ivan sessions new <会话键>")
+}
+
+func sessionsList(cfg *config.Config, jsonOut bool) int {
+	var list []runner.SessionStatus
+	if raw, err := cli.Call(cfg.SocketPath(), cli.OpSessionsList, "", 5*time.Second); err == nil {
+		if err := json.Unmarshal(raw, &list); err != nil {
+			fmt.Fprintf(os.Stderr, "error: 解析会话列表失败: %v\n", err)
+			return 1
+		}
+	} else {
+		state, serr := data.LoadState(cfg.StatePath())
+		if serr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", serr)
+			return 1
+		}
+		for _, k := range state.Keys() {
+			st, _ := state.Get(k)
+			list = append(list, runner.SessionStatus{Key: k, Session: st.SessionID, Workspace: st.Workspace})
+		}
+	}
+	if jsonOut {
+		b, err := json.MarshalIndent(list, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(b))
+		return 0
+	}
+	if len(list) == 0 {
+		fmt.Println("没有会话键。")
+		return 0
+	}
+	pooled := 0
+	fmt.Printf("%-44s %-16s %-8s %s\n", "会话键", "会话", "状态", "工作区")
+	for _, s := range list {
+		if s.Pooled {
+			pooled++
+		}
+		fmt.Printf("%-44s %-16s %-8s %s\n", clip(s.Key, 44), dash(s.Session), sessionStateOf(s), s.Workspace)
+	}
+	fmt.Printf("共 %d 个会话键，池内 %d 个\n", len(list), pooled)
+	return 0
+}
+
+func sessionsNew(cfg *config.Config, key string) int {
+	raw, err := cli.Call(cfg.SocketPath(), cli.OpSessionsNew, key, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v（会话轮换需要 daemon 运行）\n", err)
+		return 1
+	}
+	var rot runner.SessionRotation
+	if err := json.Unmarshal(raw, &rot); err != nil {
+		fmt.Fprintf(os.Stderr, "error: 解析轮换结果失败: %v\n", err)
+		return 1
+	}
+	switch {
+	case rot.Rotated:
+		fmt.Printf("已轮换 %s：%s → %s（旧会话保留）\n", rot.Key, dash(rot.OldID), rot.NewID)
+	case rot.Pooled:
+		fmt.Printf("%s 未轮换：%s\n", rot.Key, rot.Reason)
+	default:
+		fmt.Printf("%s 当前没有活跃实例，无需轮换（下一条消息将自然开启新会话）\n", rot.Key)
+	}
+	return 0
+}
+
+func sessionStateOf(s runner.SessionStatus) string {
+	switch {
+	case s.Running:
+		return "running"
+	case s.Queued > 0:
+		return "queued"
+	case s.Pooled:
+		return "idle"
+	default:
+		return "-"
+	}
+}
+
+func dash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}

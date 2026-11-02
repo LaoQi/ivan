@@ -55,6 +55,8 @@ func run(args []string) int {
 		return cmdPause(args[1:])
 	case "resume":
 		return cmdResume(args[1:])
+	case "sessions":
+		return cmdSessions(args[1:])
 	}
 	usage()
 	return 1
@@ -109,6 +111,8 @@ func usage() {
                                        发一条通知给用户（走 HTTP 入口的同一投递管线）
   ivan pause | ivan resume             暂停/恢复无人值守触发（定时作业与自动续跑）
   ivan cancel <会话键>                 取消某会话正在跑的回合
+  ivan sessions [list] [--json]        列出会话键（未运行时读状态文件）
+  ivan sessions new <会话键>           把该会话轮换到干净的新会话（旧会话保留）
   ivan config                          输出默认配置示例
   ivan -v                              版本
 `)

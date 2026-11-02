@@ -185,3 +185,36 @@ Inbound → runner.dispatch(msg)
 - `TestPoolEvictsIdleWithWorkerFlagCleared`：反向条件，回合结束、worker 退出、队列为空的实例可被淘汰腾位。
 
 **行为变化（部署需注意）**：`max_agents`（默认 8）从"软上限"变成**硬上限**。并发活跃会话超过该值时，新会话的消息会被丢弃并回 `busy`（`ErrPoolFull`），而不是继续建实例。多来源并发较大（如多个外部服务同时 `/request`）时应调高它。
+
+## 13 会话轮换 `ivan sessions`（2026-11-02）
+
+**动机**：升级部署后，某个会话键可能带着升级前的旧上下文（旧认知、过期结论）。此前只能靠停机、手改 `state.json`、再起服务——三个硬伤：停机期间 QQ 断连消息丢失；`state.json` 是 daemon 内存的镜像，运行中手改会被下一次写入覆盖；还得人肉知道 `memory/<slug>.md`、`agents/<slug>/`、`workspaces/<workspaceID>/` 三处内部布局。改成一条在线控制指令。
+
+**语义**：把该会话键的 agent **推进到干净的新会话**，**旧的一切原样保留**（不删文件、不删映射历史文件、不归档）。
+
+- 调用库侧 `agent.NewSession()`：清 history / stats / prompt，`store.rotate()` 生成新会话 id；旧 `.jsonl` 文件**不动、不删**，只是不再往里写。
+- 与 `next_session` 的区别：`next_session` 带摘要交接（新会话从摘要起步），`ivan sessions new` **不带任何上下文**，就是全新开始。
+- **只处理池内有实例的键**：池内没有实例说明当前没有 agent 持着旧会话状态，下一条消息自然建实例、自然读不到映射、自然从干净会话开始——这条路径本来就是对的，因此不动 `state.json`，如实回一句"无需轮换"即可。
+
+| 池内状态 | 动作 |
+|---|---|
+| 无实例 | 不轮换、不改映射，回 `Reason`（下一条消息自然开新会话） |
+| 空闲（`idleLocked()`） | `ag.NewSession()` → 立即 `State.Set` 写回新 id → 记 `session_rotated` 事件与人读日志 |
+| 在跑 / 有排队 | 拒绝，提示先 `ivan cancel` 或等回合结束（不在回合中途换会话） |
+
+**命令**：
+
+```
+ivan sessions [list] [--json]     列出会话键（映射 id、池内状态、工作区）；daemon 未跑时读 state.json 回退
+ivan sessions new <会话键>         轮换该会话（需 daemon 运行）
+```
+
+`list` 的状态列：`running` / `queued` / `idle`（池内）/ `-`（仅映射）。
+
+**实现**：`runner/session_rotate.go`（`Sessions()` 合并 state 与池快照、`RotateSession()`）、`channel/cli`（`sessions/list`、`sessions/new` 两个 op）、`daemon.Control` 两个分支、`commands.go`（`cmdSessions`）。
+
+**测试**：`runner/session_rotate_test.go`（列表合并与升序、无实例为 no-op 且映射不变、轮换切新 id 且**旧文件字节不变**、轮换后新会话不带旧回合内容、回合在跑时拒绝、空键拒绝）、`daemon/sessions_test.go`（socket 往返 list→new→list 显示新 id、未知键 no-op、空键报错）。
+
+**变异复验 4 处全部准确变红**：无实例时也标记为已轮换、不写回映射、不调 `NewSession`（旧上下文残留）、跳过忙碌检查。
+
+**顺带修掉的既有竞态**：`channel/cli` 的 `accept()` 在 goroutine 内 `wg.Add(1)`，与 `Stop()` 的 `wg.Wait()` 构成数据竞争（`go test -race -count=30` 在**未改动**的 HEAD 上同样复现）。修法：`Start` 在启动 goroutine **之前**持锁 `wg.Add(1)`，`accept()` 改为 `defer s.wg.Done()`。

@@ -52,7 +52,7 @@
 ## 结构（现行，见 `docs/plan.md` §5）
 
 ```
-main.go               CLI：run / daemon / send / status / config / version；--session 指定会话键 [已实现]
+main.go               CLI：run / daemon / send / status / sessions / config / version；--session 指定会话键 [已实现]
 commands.go           子命令实现：flag 解析、状态渲染、磁盘回退、信号上下文 [已实现]
 config/               ivan 配置（内嵌 battlelab agent.Config + runner/daemon/channels 段；yaml + IVAN_*；tanya 凭证借用）[已实现]
 bus/                  消息模型 + Bus（两条缓冲流、非阻塞投递、丢弃计数、关闭语义）+ 会话键归一/KeySlug [已实现，零依赖]
@@ -61,7 +61,7 @@ channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping/c
 channel/log/          人类可读 Sink（io.Writer，stdlib 依赖）[已实现]
 data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写，含会话映射、暂停、日用量、回合进行中标记）/ Lock（flock）/ LogFile / ProcessAlive / TrimFileTail（按行裁剪）[已实现]
 prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段（含会话键、记忆文件、目标文件路径）；全局说明由 `config.global_agents` 注入（默认 `~/.config/ivan/AGENTS.md`）[已实现]
-runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消）+ 回合驱动与事件分流 + 阈值交接提示/预算暂停闸门/schedule 工具 + `send_message`/`send_file` 工具 + 崩溃回合恢复（`interrupted`）/记忆裁剪 [已实现]
+runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消、会话轮换）+ 回合驱动与事件分流 + 阈值交接提示/预算暂停闸门/schedule 工具 + `send_message`/`send_file` 工具 + 崩溃回合恢复（`interrupted`）/记忆裁剪 [已实现]
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]

@@ -429,6 +429,28 @@ func (d *Daemon) Control(op, arg string) (any, error) {
 		}
 		_ = d.human.Notice("人工取消会话回合 %s", key)
 		return map[string]string{"session": key, "status": "cancelled"}, nil
+	case cli.OpSessionsList:
+		if d.runner == nil {
+			return nil, errors.New("runner 未装配")
+		}
+		return d.runner.Sessions(), nil
+	case cli.OpSessionsNew:
+		if d.runner == nil {
+			return nil, errors.New("runner 未装配")
+		}
+		key := strings.TrimSpace(arg)
+		if key == "" {
+			return nil, errors.New("缺少会话键")
+		}
+		rot, err := d.runner.RotateSession(key)
+		if err != nil {
+			return nil, err
+		}
+		if rot.Rotated {
+			_ = d.human.Notice("会话已轮换 %s：%s → %s（旧会话保留）", rot.Key, rot.OldID, rot.NewID)
+			d.events.Note("session_rotated", fmt.Sprintf("%s %s → %s", rot.Key, rot.OldID, rot.NewID))
+		}
+		return rot, nil
 	case cli.OpPause, cli.OpResume:
 		if d.state == nil {
 			return nil, errors.New("缺少状态文件，无法切换暂停开关")

@@ -40,6 +40,9 @@ const (
 	OpCancel     = "cancel"
 	OpResume     = "resume"
 
+	OpSessionsList = "sessions/list"
+	OpSessionsNew  = "sessions/new"
+
 	maxFrame     = 1 << 20
 	cliStreamLen = 4000
 )
@@ -106,6 +109,7 @@ func (s *Socket) Start(ctx context.Context, b *bus.Bus) error {
 	}
 	s.bus = b
 	s.ln = ln
+	s.wg.Add(1)
 	s.mu.Unlock()
 	go s.accept()
 	return nil
@@ -215,6 +219,7 @@ func (sc *streamConn) Update(ctx context.Context, text string, done bool) error 
 }
 
 func (s *Socket) accept() {
+	defer s.wg.Done()
 	for {
 		c, err := s.ln.Accept()
 		if err != nil {
