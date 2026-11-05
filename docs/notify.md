@@ -17,6 +17,8 @@
 
 两者的差别不是配置项，而是**一个只出站、一个只进站**：`/notify` 不需要回复也不该慢；`/request` 下游不选出口、不收推送——发请求、拿会话键、自己轮询。回合的出站（终局回复、确认问题、告警）一律**尽力而为广播到可用渠道**，不定向回调用方。
 
+**对外文档要回答"该不该把事交给 ivan"**：`channel/http/guide.md` 有一节「能让 ivan 做什么」列出模型侧工具（`run_shell`、`read_image`、`send_file`、`send_message`、`schedule`、`next_session`）与 `send_file` 的路径/大小约束，manifest 的 `summary`/`capabilities`（含 `files`、`shell`）也据此写——能力标签的唯一作用是检索，调用方会按"能发文件""能执行命令"找服务。附件的对外口径只有一条：**要发文件走 `/request`，`/notify` 纯文本没有附件入口**。
+
 **对外文档只讲调用方需要知道的**（纪律）：`channel/http/guide.md` 与 manifest 是**给其他 agent 看的**，只写"能发通知、怎么发、回执怎么用"——不写目标如何产生（认领、通道名、openid、平台频控阈值等全是 ivan 内部实现），调用方既用不上也无权关心。内部机制只写在本文件与 `docs/qq-bot.md`。`channel/http` 的测试对 guide/manifest 有反向断言：出现 `认领`/`openid` 即失败。
 
 **为什么归 Trigger 层而不是 `Channel` 层**（术语修订）：`Channel` 接口只拿得到 `Bus`，出站只能 `bus.Post`（丢弃不可知、拿不到投递错误），而 `/notify` 必须能给调用方回执。所以它和 `schedule` 同属"产出/转发 + 同步回执"这一类，按 `docs/plan.md` §4 的三分法归 Trigger 层；实现上仍复用 `channel.Manager.Route` 做真实投递，只是**直投而不经总线**（与 `runner.TriggerJob` 同构）。
@@ -105,9 +107,9 @@
 - 总线满或停机 `503`；缺字段 `400`；超限 `429`（`http.request_per_minute`，默认 5——每条都是一次真实模型回合）。
 - **确认流程异步**：agent 需要用户确认时用 `send_message` 广播（见 §4）；用户答复走用户自己的会话，不会自动接回 `http:ci` 上下文。agent 会把待确认的问题写进回合终局正文，调用方查询即可看到"在等确认"。
 
-## 4 `send_message` 工具
+## 4 `send_message` / `send_file` 工具
 
-给任何会话里的 agent 一个主动出站口：
+`send_message` 给任何会话里的 agent 一个主动出站口：
 
 ```
 send_message(text)
@@ -116,6 +118,16 @@ send_message(text)
 - **不选择出口**：交给各通道的默认通知出口（`channel.Noticer`）广播，尽力而为。收件人集合由通道自决，模型不能给任意账号发消息——这是本能力的底线。
 - **投递汇总如实**：全部成功 `ok: 已广播到 N 个目标（…）`；部分成功 `partial: 已发 N/M 个目标（成功：…）`；全部失败 `error: 全部通知出口投递失败（N 个目标）`；没有通道实现通知出口 `error: 没有实现通知出口的通道`。模型可据此改口，不谎报 ok。
 - `Kind = bus.KindNotice`；正文经通道通知出口投递（切分/markdown 由通道自己的 Notice 实现负责）。
+
+`send_file` 是它的附件版本（`runner/sendfiletool.go`）：
+
+```
+send_file(paths[1-3], text?)
+```
+
+- 只投递**ivan 所在主机上**的文件：路径按会话工作区解析相对路径，必须是存在、可读、非目录的普通文件；`attachmentRef` 只做这些明显错误拦截，大小由通道按平台限制判定（QQ 单文件 200MB、媒体类 20MB 超出降级普通文件）。
+- 出口同 `send_message`：只有实现 `channel.FileNoticer` 的通道参与，其余在回执里记 `no_targets`，所以多渠道下常见 `partial`——**属正常，不要当失败重试**。
+- 工具结果 `ok`/`partial`/`error` 与 `send_message` 口径一致；`Options.SendFiles` 未接时不注册该工具。
 
 ## 5 `ivan notify`（本地入口）
 

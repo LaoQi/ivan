@@ -29,9 +29,9 @@ func (c *Channel) handleManifest(w http.ResponseWriter, r *http.Request) {
 	m := map[string]any{
 		"schema":       "service-manifest/v1",
 		"name":         "ivan",
-		"summary":      "常驻后台 agent：定时触发与计划任务、QQ 单聊通道；对外提供通知入口（/notify）与异步 agent 请求（/request）",
-		"capabilities": []string{"agent", "ai", "assistant", "schedule", "cron", "qq", "notify"},
-		"usage":        "通知（source 必填）: curl -X POST {{base}}/notify -H 'Content-Type: application/json' -d '{\"source\":\"ci\",\"title\":\"构建失败\"}'；agent 请求: POST {{base}}/request 受理，GET {{base}}/request?session=<键> 轮询；接口指南: curl -s {{base}}/guide.md",
+		"summary":      "常驻后台 agent：可在其所在主机执行命令、读写文件、代发文件给用户、创建定时作业；对外提供通知入口（/notify）与异步 agent 请求（/request）",
+		"capabilities": []string{"agent", "ai", "assistant", "schedule", "cron", "qq", "notify", "files", "file", "shell", "exec", "bot"},
+		"usage":        "通知（source 必填，纯文本）: curl -X POST {{base}}/notify -H 'Content-Type: application/json' -d '{\"source\":\"ci\",\"title\":\"构建失败\"}'；要让 agent 做事（执行命令、读写文件、代发文件、建定时作业）用 POST {{base}}/request，正文写清要求与 ivan 主机上的文件路径，GET {{base}}/request?session=<键> 轮询；接口指南: curl -s {{base}}/guide.md",
 		"endpoints": []map[string]string{
 			{"name": "request", "proto": "http", "url": "{{base}}/request", "note": "POST 提交 agent 任务（source/purpose/text 必填，异步受理返回会话键）；GET ?session= 轮询结果"},
 			{"name": "notify", "proto": "http", "url": "{{base}}/notify", "note": "纯转发通知（source 必填，title/body 至少一项），投递目标由 ivan 决定、请求方不指定；逐目标回执 sent/failed/no_targets"},

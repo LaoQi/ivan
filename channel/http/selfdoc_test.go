@@ -46,6 +46,22 @@ func TestManifestSelfDoc(t *testing.T) {
 	if !strings.Contains(notifyNote, "no_targets") {
 		t.Fatalf("notify 端点说明应给出回执取值，得到 %q", notifyNote)
 	}
+	caps, ok := out["capabilities"].([]any)
+	if !ok {
+		t.Fatalf("capabilities = %#v", out["capabilities"])
+	}
+	hasFiles := false
+	for _, c := range caps {
+		if c == "files" {
+			hasFiles = true
+		}
+	}
+	if !hasFiles {
+		t.Fatalf("capabilities 应含 files（调用方按能力检索）: %#v", caps)
+	}
+	if !strings.Contains(out["summary"].(string), "文件") {
+		t.Fatalf("summary 应说明可代发文件: %v", out["summary"])
+	}
 	// 接口文档是给调用方看的：不暴露 ivan 内部的目标认领机制
 	for _, text := range []string{out["usage"].(string), notifyNote} {
 		if strings.Contains(text, "认领") || strings.Contains(text, "openid") {
@@ -92,6 +108,7 @@ func TestGuideEndpoint(t *testing.T) {
 		"POST /notify", "POST /request", "GET /request?session=",
 		"/healthz", "/.well-known/service.json", "/guide.md",
 		"targets[].result", "no_targets", "不要重试",
+		"send_file", "200MB", "重启", "202",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("指南缺少 %q", want)
