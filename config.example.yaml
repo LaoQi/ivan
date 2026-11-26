@@ -30,11 +30,11 @@ session_mode: global
 
 # 运行器与自主推进（见 docs/sessions.md）
 runner:
-  # 一级：建议交接阈值（tokens）。上下文达到后在回合内往会话里注入一条"收尾后交接"的提示，
-  # 模型自行决定是否先做完当前步骤（不额外多发请求；见 docs/handoff.md）
+  # 建议交接阈值（tokens）。上下文达到后先由回合内钩子注入一条"本阶段收尾后交接"的辅助提示
+  # （不额外多发请求）；回合结束仍达阈值则下令交接并直接开一回合（见 docs/handoff.md）
   handoff_hint_tokens: 180000
-  # 二级：强制交接阈值（tokens）。达到后由 ivan 在回合间隙直接强制复位（按指令取摘要 → 开新会话）；
-  # 取不到摘要即停，刚复位完仍超阈值也停（不再来第二次）
+  # 强制交接阈值（tokens）。达到后由 ivan 在回合间隙直接强制复位（按指令取摘要 → 开新会话），
+  # 优先于上面的辅助提示与回合末下令；取不到摘要即停，刚复位完仍超阈值也停（不再来第二次）
   handoff_force_tokens: 256000
   # 自动续跑（默认关）：开启后单条消息触发的任务可在交接后自行继续；
   # 受 max_turns_per_task / max_tokens_per_task / max_tokens_per_day 与 ivan pause 约束

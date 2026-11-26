@@ -84,10 +84,10 @@ func lastMessage(t *testing.T, srv *fakellm.Server) string {
 	return string(msgs[len(msgs)-1])
 }
 
-func TestHandoffHintInjectedInsideTurn(t *testing.T) {
+func TestHandoffDirectiveAtTurnEnd(t *testing.T) {
+	// 单请求回合：阈值只在回合末跨过，回合内没有下一次请求，故只有回合末下令。
 	srv := fakellm.New(
-		fakellm.Step{Content: "先做一半", Tools: []fakellm.ToolCall{{ID: "c1", Name: "run_shell", Args: `{"command":"echo hi"}`}},
-			Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
+		fakellm.Step{Content: "这一段做完了", Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
 		handoffStep("已完成一半，下一步继续做", false),
 	)
 	defer srv.Close()
@@ -100,31 +100,65 @@ func TestHandoffHintInjectedInsideTurn(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	if calls := srv.Calls(); calls != 3 {
-		t.Fatalf("请求数 %d，期望 3（首轮、带提示的工具轮、交接工具的收尾轮）", calls)
+		t.Fatalf("请求数 %d，期望 3（单请求回合 + 新回合的交接工具轮与其收尾轮）", calls)
 	}
 	reqs := srv.Requests()
 	if strings.Contains(allMessages(reqs[0]), "建议交接阈值") {
-		t.Fatalf("首轮不应带提示: %s", allMessages(reqs[0]))
+		t.Fatal("首回合不应带任何交接提示")
 	}
 	last := string(reqs[1].Messages[len(reqs[1].Messages)-1])
-	if !strings.Contains(last, "建议交接阈值") || !strings.Contains(last, "next_session") {
-		t.Fatalf("工具轮后的请求应带上建议交接提示: %s", last)
+	if !strings.Contains(last, "现在开始交接进度") || !strings.Contains(last, "next_session") {
+		t.Fatalf("新回合首个请求应带上交接指令: %s", last)
 	}
-	if st := r.Status(); st.Hinted != 1 || st.Handoffs != 1 {
-		t.Fatalf("计数异常: hinted=%d handoffs=%d", st.Hinted, st.Handoffs)
+	st := r.Status()
+	if st.Hinted != 0 || st.Directives != 1 || st.Handoffs != 1 || st.Continued != 1 {
+		t.Fatalf("计数异常: hinted=%d directives=%d handoffs=%d continued=%d", st.Hinted, st.Directives, st.Handoffs, st.Continued)
 	}
 	if session, ok := r.Session("cli:default"); !ok || session == "" {
 		t.Fatal("交接后未更新会话")
 	}
 }
 
-func TestHandoffHintOncePerDispatch(t *testing.T) {
+func TestHintInsideTurnThenDirective(t *testing.T) {
+	// 工具轮里跨过阈值：回合内先给辅助提示（模型可先把这步做完），回合末再下令交接。
 	srv := fakellm.New(
-		fakellm.Step{Content: "第一段", Tools: []fakellm.ToolCall{{ID: "c1", Name: "run_shell", Args: `{"command":"echo a"}`}},
+		fakellm.Step{Content: "先做一半", Tools: []fakellm.ToolCall{{ID: "c1", Name: "run_shell", Args: `{"command":"echo hi"}`}},
 			Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
-		fakellm.Step{Content: "第二段", Tools: []fakellm.ToolCall{{ID: "c2", Name: "run_shell", Args: `{"command":"echo b"}`}},
-			Usage: fakellm.Usage{PromptTokens: 152000, CompletionTokens: 10, TotalTokens: 152010}},
-		fakellm.Step{Content: "收尾", Usage: fakellm.Usage{PromptTokens: 154000, CompletionTokens: 10, TotalTokens: 154010}},
+		fakellm.Step{Content: "这一段做完了", Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
+		handoffStep("已完成一半，下一步继续做", false),
+	)
+	defer srv.Close()
+	cfg := bareConfig(t, srv.BaseURL())
+	cfg.Runner.HandoffHintTokens = 100000
+	cfg.Runner.HandoffForceTokens = 200000
+	r := newP4Rig(t, cfg, nil)
+
+	if err := r.Dispatch(context.Background(), inbound("cli:default", "r1", "做个长任务")); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if calls := srv.Calls(); calls != 4 {
+		t.Fatalf("请求数 %d，期望 4（首回合两次请求 + 新回合的交接工具轮与其收尾轮）", calls)
+	}
+	reqs := srv.Requests()
+	if strings.Contains(allMessages(reqs[0]), "建议交接阈值") {
+		t.Fatal("首轮尚未达阈值，不应带提示")
+	}
+	if !strings.Contains(allMessages(reqs[1]), "本阶段收尾后") {
+		t.Fatalf("工具轮之后的请求应带上回合内辅助提示: %s", allMessages(reqs[1]))
+	}
+	if !strings.Contains(allMessages(reqs[2]), "现在开始交接进度") {
+		t.Fatalf("新回合首个请求应带上回合末指令: %s", allMessages(reqs[2]))
+	}
+	st := r.Status()
+	if st.Hinted != 1 || st.Directives != 1 || st.Handoffs != 1 || st.Continued != 1 {
+		t.Fatalf("计数异常: hinted=%d directives=%d handoffs=%d continued=%d", st.Hinted, st.Directives, st.Handoffs, st.Continued)
+	}
+}
+
+func TestHandoffDirectiveOncePerDispatch(t *testing.T) {
+	srv := fakellm.New(
+		fakellm.Step{Content: "第一段做完", Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
+		fakellm.Step{Content: "还是没交接", Usage: fakellm.Usage{PromptTokens: 154000, CompletionTokens: 10, TotalTokens: 154010}},
 	)
 	defer srv.Close()
 	cfg := bareConfig(t, srv.BaseURL())
@@ -136,14 +170,15 @@ func TestHandoffHintOncePerDispatch(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	reqs := srv.Requests()
-	if calls := srv.Calls(); calls != 3 {
-		t.Fatalf("请求数 %d，期望 3", calls)
+	if calls := srv.Calls(); calls != 2 {
+		t.Fatalf("请求数 %d，期望 2（下令后的新回合不再下令）", calls)
 	}
-	if n := strings.Count(allMessages(reqs[2]), "建议交接阈值"); n != 1 {
-		t.Fatalf("一次推进只注入一次提示，第三次请求里出现 %d 次", n)
+	if n := strings.Count(allMessages(reqs[1]), "现在开始交接进度"); n != 1 {
+		t.Fatalf("一次推进只发一条交接指令，第二次请求里出现 %d 次", n)
 	}
-	if st := r.Status(); st.Hinted != 1 {
-		t.Fatalf("hinted=%d，期望 1", st.Hinted)
+	st := r.Status()
+	if st.Hinted != 0 || st.Directives != 1 || st.Continued != 1 {
+		t.Fatalf("一次推进只多开一回合: hinted=%d directives=%d continued=%d", st.Hinted, st.Directives, st.Continued)
 	}
 }
 
@@ -186,10 +221,10 @@ func TestHandoffHintSkippedWhenPaused(t *testing.T) {
 	if strings.Contains(allMessages(reqs[1]), "建议交接阈值") {
 		t.Fatal("暂停时不应注入交接提示")
 	}
-	if st := r.Status(); st.Hinted != 0 || !st.Paused {
-		t.Fatalf("状态异常: hinted=%d paused=%v", st.Hinted, st.Paused)
+	if st := r.Status(); st.Hinted != 0 || st.Directives != 0 || !st.Paused {
+		t.Fatalf("状态异常: hinted=%d directives=%d paused=%v", st.Hinted, st.Directives, st.Paused)
 	}
-	if !strings.Contains(buf.String(), "跳过上下文交接提示") {
+	if !strings.Contains(buf.String(), "跳过交接提醒") {
 		t.Fatalf("缺少暂停事件: %s", buf.String())
 	}
 }
@@ -425,7 +460,7 @@ func TestForceHandoffFailureStops(t *testing.T) {
 	}
 }
 
-func TestHintThenForceEscalation(t *testing.T) {
+func TestForceSkipsHintAndDirective(t *testing.T) {
 	srv := fakellm.New(
 		fakellm.Step{Content: "第一段", Tools: []fakellm.ToolCall{{ID: "c1", Name: "run_shell", Args: `{"command":"echo a"}`}},
 			Usage: fakellm.Usage{PromptTokens: 150000, CompletionTokens: 10, TotalTokens: 150010}},
@@ -434,7 +469,7 @@ func TestHintThenForceEscalation(t *testing.T) {
 	)
 	defer srv.Close()
 	cfg := bareConfig(t, srv.BaseURL())
-	cfg.Runner.HandoffHintTokens = 100000
+	cfg.Runner.HandoffHintTokens = 180000
 	cfg.Runner.HandoffForceTokens = 200000
 	r := newP4Rig(t, cfg, nil)
 
@@ -443,14 +478,16 @@ func TestHintThenForceEscalation(t *testing.T) {
 	}
 	reqs := srv.Requests()
 	if calls := srv.Calls(); calls != 3 {
-		t.Fatalf("请求数 %d，期望 3（建议档注入 + 强制复位）", calls)
+		t.Fatalf("请求数 %d，期望 3（首回合两次请求 + 摘要请求）", calls)
 	}
-	if second := string(reqs[1].Messages[len(reqs[1].Messages)-1]); !strings.Contains(second, "建议交接阈值") {
-		t.Fatalf("第二次请求应为建议档提示: %s", second)
+	for i, req := range reqs {
+		if strings.Contains(allMessages(req), "建议交接阈值") {
+			t.Fatalf("回合末已超强制阈值，不应发交接提示或指令（第 %d 次请求）", i+1)
+		}
 	}
 	st := r.Status()
-	if st.Hinted != 1 || st.Forced != 1 || st.Handoffs != 1 {
-		t.Fatalf("计数异常: hinted=%d forced=%d handoffs=%d", st.Hinted, st.Forced, st.Handoffs)
+	if st.Hinted != 0 || st.Directives != 0 || st.Forced != 1 || st.Handoffs != 1 {
+		t.Fatalf("计数异常: hinted=%d directives=%d forced=%d handoffs=%d", st.Hinted, st.Directives, st.Forced, st.Handoffs)
 	}
 }
 

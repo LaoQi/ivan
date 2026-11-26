@@ -30,7 +30,7 @@
 - 崩溃回合：`DispatchTurn` 期间在 `state.json` 留 `running` 标记，启动时 `DrainRunning` 清残留、记 `turn_interrupted`、并在该会话下一次回合注入"上次回合被中断、先核对实际状态"的提示（只注入一次）
 - 记忆裁剪：`runner.memory_max_bytes`（默认 0=不裁剪），回合结束后按行边界保留尾部 + 头部裁剪标记（`data.TrimFileTail`）
 - 交接阈值两档（绝对值，`handoff_hint_tokens` 180K / `handoff_force_tokens` 256K，判据 `max(上报 ContextTokens, 估算 Est)`）：
-  **建议档**由 `BeforeRequest` 钩子（`runner/handoffhint.go`，每会话实例一个）在回合内 `AppendNotice` 注入提示——注入落在当回合的请求里，**不再额外多发一轮**，一次入站消息的推进过程内只注入一次、会话边界重新计；**强制档**不走钩子，回合间隙由 runner 调 `agent.ForceHandoff` 强制复位（摘要指令由 ivan 给、库零文案），取不到摘要即停、刚复位完仍超阈值也停（局部 `justReset`，不设次数配额）；两档都受暂停/预算闸门，见 `docs/handoff.md`
+  **建议档**有两条路：`BeforeRequest` 钩子（`runner/handoffhint.go`，每会话实例一个）在回合内 `AppendNotice` 注入**辅助提示**（注入落在当回合请求里、不多发一轮，一次推进至多一条、会话边界重新计），回合结束仍达阈值则由 `task.run` 出口写一条**命令语气的交接指令并直接开一回合**（一次推进至多一条，暂停/预算命中就不开）；**强制档**不走钩子，回合间隙由 runner 调 `agent.ForceHandoff` 强制复位（摘要指令由 ivan 给、库零文案），取不到摘要即停、刚复位完仍超阈值也停（局部 `justReset`，不设次数配额）；三处都受暂停/预算闸门，计数分 `hints`/`directives`/`forced`，见 `docs/handoff.md`
 - 摘要请求的用量（`ForceHandoff`）**不计入预算**：库不计 `Stats()`，ivan 也不估算（预算只在一处统计），代价靠"一次推进至多一次 + 调用前过预算闸门"控制
 - 预算只在一处统计：`runner`（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日用量落 `state.json` 跨进程累计），调度器用注入的 `Budget` 回调复用；不要再加第二个预算口径
 - 暂停语义：`paused` 只挡**无人值守路径**（定时作业触发、交接后自动续跑、阈值交接提示），用户主动消息照常处理

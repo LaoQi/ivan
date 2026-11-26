@@ -33,9 +33,10 @@ Inbound → runner.dispatch(msg)
 
 1. 聚合本轮文本 → `OutboundMessage{ReplyTo: inbound.MessageID}` → Bus（回到来源渠道）。
 2. `TakeHandoff()`：若有交接 → 更新 `state.json` 的 session 映射 → 若 `Continue` 则立即 `agent.Continue(ctx, sink)` 继续跑（这就是长任务跨会话推进）。
-3. 上下文压力（**两档，判定与文案见 `docs/handoff.md`**）：判据统一为 `contextUsed = max(上报 prompt tokens, 本地估算 Est)`，对比两个绝对阈值——
-   - **一级 建议交接** `handoff_hint_tokens`（默认 180000）：由 `BeforeRequest` 钩子在**回合内**注入"建议在本阶段收尾后调用 next_session 交接"，模型可先把当前步骤做完；本回合这次请求就带上提示，**不再额外多发一轮**（旧实现是回合后注入 + `Continue`）。一次入站消息的推进过程内只注入一次，会话边界（交接/新建/轮换）重新计。
-   - **二级 强制交接** `handoff_force_tokens`（默认 256000）：**不走钩子**——回合间隙由 runner 调 `agent.ForceHandoff` 直接复位（按 ivan 给的指令取摘要 → 旧会话落地 → 轮转新会话，事件 `handoff_force`）；摘要取不到即停（事件 `handoff_forced`，会话与文件零变化），刚复位过仍超阈值也停并给诊断（不再来第二次）。两档都受暂停与预算闸门。
+3. 上下文压力（**一条主线 + 两条兜底，判定与文案见 `docs/handoff.md`**）：判据统一为 `contextUsed = max(上报 prompt tokens, 本地估算 Est)`，对比两个绝对阈值——
+   - **主线 回合内辅助提示** `handoff_hint_tokens`（默认 180000）：`BeforeRequest` 钩子在**回合内**注入"本阶段收尾后调用 next_session 交接"（建议语气，模型可先把当前步骤做完）；提示随当回合请求带出、**不多发请求**。一次入站消息的推进过程内只提示一次，会话边界（交接/新建/轮换）重新计。
+   - **兜底一 回合末下令**（同一阈值）：回合结束仍达阈值且本次推进没交接过 → 往历史末尾写一条命令语气的交接指令并**直接开一回合**（这一回合就是交接回合，配 `handoff_directive` 事件）；一次推进至多一条，暂停/预算命中就不开。
+   - **兜底二 强制交接** `handoff_force_tokens`（默认 256000）：**不走钩子**——回合间隙由 runner 调 `agent.ForceHandoff` 直接复位（按 ivan 给的指令取摘要 → 旧会话落地 → 轮转新会话，事件 `handoff_force`）；摘要取不到即停（事件 `handoff_forced`，会话与文件零变化），刚复位过仍超阈值也停并给诊断（不再来第二次）。三处都受暂停与预算闸门。
 4. 预算（**已实现**）：`max_turns_per_task`（续跑轮次）、`max_tokens_per_task`（单任务）、`max_tokens_per_day`（**全局日预算**，含用户消息/定时作业/续跑，按本地日累计在 `state.json`，跨进程生效）任一超限 → 停止推进，落 `budget` 事件后安静停下。
 5. 失败：回合错误 → 记事件、回错误摘要到来源渠道（**不做**自动重试：重试会把无人值守的成本放大）。
 6. 暂停（`state.json: paused`，`ivan pause/resume`）只挡**无人值守路径**：定时作业触发、交接后自动续跑、阈值交接提示；用户主动发来的消息照常处理（人在场时不该被挡住）。
@@ -217,7 +218,7 @@ ivan sessions new <会话键>         轮换该会话（需 daemon 运行）
 
 **顺带修掉的既有竞态**：`channel/cli` 的 `accept()` 在 goroutine 内 `wg.Add(1)`，与 `Stop()` 的 `wg.Wait()` 构成数据竞争（`go test -race -count=30` 在**未改动**的 HEAD 上同样复现）。修法：`Start` 在启动 goroutine **之前**持锁 `wg.Add(1)`，`accept()` 改为 `defer s.wg.Done()`。
 
-## 14 交接迁移：建议档钩子 + 强制档 `ForceHandoff`（2026-11-26）
+## 14 交接迁移：建议档钩子 + 强制档 `ForceHandoff`（2026-11-26；2026-11-27 再次调整，现行形态见 §15）
 
 P4 的两档阈值原实现是"回合结束后 `AppendNotice` + `Continue` 一轮"：建议档白花一次请求，强制档指望模型照做（不照做就只能停）。库侧补齐生命周期钩子（`agent.WithHooks`）、钩子 ctx 携带实例（`agent.FromContext`）与外部强制复位（`agent.ForceHandoff`）后，ivan 侧改为两条各归其位的路，细节见 `docs/handoff.md`：
 
@@ -226,3 +227,14 @@ P4 的两档阈值原实现是"回合结束后 `AppendNotice` + `Continue` 一�
 3. **口径收敛**：删掉 `task.pressure()`/`levelTokens()`/`forcedStop()`/`handoffForceNotice` 与 `hinted`/`forced` 局部标志（由钩子与 `justReset` 承担）；`handoff_force` 语义变为"强制复位成功"，`handoff_forced` 变为"复位失败/复位后仍超阈值而停"；一次轮转只发一条事实事件（模型路径 `handoff`、强制路径 `handoff_force`）。
 4. **预算**：摘要请求的用量不记入 `max_tokens_per_task`/`max_tokens_per_day`（库不计 `Stats()`，ivan 也不估算），靠"一次推进至多一次 + 调用前过预算闸门"控制。
 5. **测试**：`runner/p4_test.go` 8 例改写（阈值改成 100000/200000 大数 + 假 LLM 报 `prompt_tokens`，避开 system prompt 估算量），覆盖回合内注入/一次推进一次/未达阈/暂停跳过/强制复位（含摘要请求不带工具与 `TokensToday` 不含摘要用量）/复位后续跑/摘要失败停且不轮转/建议→强制升级/复位后仍超阈值的诊断。`go build/vet ./...`、`gofmt -l`、`go test ./...`、`go test -race ./runner/`、`go test ./probe/ -v` 全绿。
+
+## 15 交接最终形态：回合内辅助提示 + 回合末下令 + 强制复位（2026-11-27）
+
+真实模型实测暴露两件事：回合内提示被无视（模型带着提示又跑 16 次工具轮、`handoffs=0`），而只保留回合末下令时判定又太晚（单回合能涨到 107K 才被问一次）。于是把两者叠起来，细节见 `docs/handoff.md`：
+
+1. **回合内辅助提示**（`BeforeRequest` 钩子，建议语气）——早发现，模型可先把手上这步做完；实测两局里模型收到提示后就自主交接了。
+2. **回合末下令**（`task.run` 出口，命令语气）——回合结束仍达阈值就写一条"现在开始交接"的指令并直接开一回合；实测从未触发，是纯粹的兜底。
+3. **强制复位**（`ForceHandoff`）不动，仍是最后一道。
+4. **计数三分**：`Status.Hinted`（提醒）/ `Directives`（下令）/ `Forced`（runner 自己复位），`ivan status` 的 runner 行印 `hints=/directives=/forced=`；事件对应 `handoff_hint`/`handoff_directive`/`handoff_force`。旧实现只有一个 `Hinted`，说不清"提示过"到底发生了哪种。
+5. **system prompt 明说不用自查用量**（"上下文用量不用自己查，接近上限会自动提醒"）——旧 prompt 下模型会反复调内置 `agent_custom` 查 `usage`，既费 token 又改变不了判定。
+6. **测试**：`TestHintInsideTurnThenDirective`（两段都给）、`TestHandoffDirectiveAtTurnEnd`（单请求回合只下令）、`TestHandoffDirectiveOncePerDispatch`（两回合都不交接只下令一次）、`TestForceSkipsHintAndDirective`（超强制档时两处提示都不发）；其余沿用。`go build/vet ./...`、`gofmt -l`、`go test ./...`、`go test -race ./runner/`、`go test ./probe/` 全绿，两局真实模型实测（`auto_continue` 关/开各一局）结论见 `docs/handoff.md` §11.5。

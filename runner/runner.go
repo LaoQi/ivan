@@ -56,6 +56,7 @@ type Runner struct {
 	handoffs     atomic.Uint64
 	continued    atomic.Uint64
 	hinted       atomic.Uint64
+	directives   atomic.Uint64
 	forced       atomic.Uint64
 	interrupted  atomic.Uint64
 	cancelled    atomic.Uint64
@@ -98,6 +99,7 @@ type Status struct {
 	QueueDropped    uint64        `json:"queue_dropped"`
 	PoolFull        uint64        `json:"pool_full"`
 	Hinted          uint64        `json:"hinted"`
+	Directives      uint64        `json:"directives"`
 	Forced          uint64        `json:"forced"`
 	Interrupted     uint64        `json:"interrupted"`
 	HandoffHint     int           `json:"handoff_hint_tokens"`
@@ -582,6 +584,7 @@ func (r *Runner) Status() Status {
 		QueueDropped:    r.queueDropped.Load(),
 		PoolFull:        r.poolFull.Load(),
 		Hinted:          r.hinted.Load(),
+		Directives:      r.directives.Load(),
 		Forced:          r.forced.Load(),
 		Interrupted:     r.interrupted.Load(),
 		HandoffHint:     r.cfg.Runner.HandoffHintTokens,
@@ -706,6 +709,7 @@ func (t *task) run(ctx context.Context) error {
 	t.inst.hint.arm()
 	defer t.inst.hint.disarm()
 	justReset := false
+	directed := false
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
 		if err != nil {
@@ -751,26 +755,33 @@ func (t *task) run(ctx context.Context) error {
 		}
 		used := contextUsed(ag.Stats())
 		force := t.r.cfg.Runner.HandoffForceTokens
-		if force <= 0 || used < force {
-			return nil
+		if force > 0 && used >= force {
+			if justReset {
+				t.forceStopped(used)
+				return nil
+			}
+			if t.r.paused() {
+				t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "force_handoff", Text: "暂停中，跳过强制交接"})
+				t.r.note("paused", t.key+" 跳过强制交接")
+				return nil
+			}
+			if t.stopForBudget(turn) {
+				return nil
+			}
+			if !t.forceHandoff(ctx, ag, used) {
+				return nil
+			}
+			justReset = true
+			t.r.continued.Add(1)
+			continue
 		}
-		if justReset {
-			t.forceStopped(used)
-			return nil
+		// 回合已结束、没交接、也没到强制档：达建议档就下令交接，并直接开一回合去做。
+		if !directed && t.handoffDirective(ag, used, turn) {
+			directed = true
+			t.r.continued.Add(1)
+			continue
 		}
-		if t.r.paused() {
-			t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "force_handoff", Text: "暂停中，跳过强制交接"})
-			t.r.note("paused", t.key+" 跳过强制交接")
-			return nil
-		}
-		if t.stopForBudget(turn) {
-			return nil
-		}
-		if !t.forceHandoff(ctx, ag, used) {
-			return nil
-		}
-		justReset = true
-		t.r.continued.Add(1)
+		return nil
 	}
 }
 
