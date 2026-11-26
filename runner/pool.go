@@ -37,7 +37,7 @@ type instance struct {
 
 	queueMu sync.Mutex
 	queue   []queuedTurn
-	worker  bool
+	busy    int // 未完成的回合额度：排队中 + 正在跑
 }
 
 type queuedTurn struct {
@@ -58,10 +58,8 @@ func (i *instance) enqueue(r *Runner, q queuedTurn, limit int) bool {
 		return false
 	}
 	i.queue = append(i.queue, q)
-	start := !i.worker
-	if start {
-		i.worker = true
-	}
+	i.busy++
+	start := i.busy == 1
 	i.queueMu.Unlock()
 	if start {
 		go i.drain(r)
@@ -73,7 +71,6 @@ func (i *instance) dequeue() (queuedTurn, bool) {
 	i.queueMu.Lock()
 	defer i.queueMu.Unlock()
 	if len(i.queue) == 0 {
-		i.worker = false
 		return queuedTurn{}, false
 	}
 	q := i.queue[0]
@@ -81,10 +78,11 @@ func (i *instance) dequeue() (queuedTurn, bool) {
 	return q, true
 }
 
+// working 表示这个会话还有活没干完：既有排队待处理的消息，也有正在跑的回合。
 func (i *instance) working() bool {
 	i.queueMu.Lock()
 	defer i.queueMu.Unlock()
-	return i.worker
+	return i.busy > 0
 }
 
 func (i *instance) pending() int {
@@ -100,9 +98,21 @@ func (i *instance) drain(r *Runner) {
 			return
 		}
 		turn, err := r.runQueued(q.ctx, i, q.msg)
-		q.done <- TurnResult{Turn: turn, Err: err}
-		close(q.done)
+		i.complete(q, TurnResult{Turn: turn, Err: err})
 	}
+}
+
+// complete 收尾一个回合：先减掉它占的额度、再把结果交给等待者，两步同在 queueMu 内。
+// 顺序反了就是"回合已结束、实例却仍算忙"的假忙——等待者从 DispatchTurn 返回后立刻
+// 查空闲状态（RotateSession / 闲置回收）会撞上它并误判。done 带一个缓冲，持锁发送不阻塞。
+func (i *instance) complete(q queuedTurn, res TurnResult) {
+	i.queueMu.Lock()
+	if i.busy > 0 {
+		i.busy--
+	}
+	q.done <- res
+	i.queueMu.Unlock()
+	close(q.done)
 }
 
 func (i *instance) setCancel(fn context.CancelFunc) {
@@ -146,10 +156,7 @@ func (i *instance) idleLocked() bool {
 		return false
 	}
 	i.mu.Unlock()
-	if i.working() {
-		return false
-	}
-	return i.pending() == 0
+	return !i.working()
 }
 
 func (r *Runner) acquire(key string) (*instance, error) {

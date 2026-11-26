@@ -85,7 +85,7 @@ func TestPoolDoesNotEvictInstanceWithQueuedWork(t *testing.T) {
 
 // TestPoolIdleCheckConsidersQueue 单独固化「锁空闲但队列还有活」这一分支。
 //
-// 直接构造该状态：worker 标志在、队列非空，但实例锁可以被抢到。
+// 直接构造该状态：回合额度还在（busy > 0）、队列非空，但实例锁可以被抢到。
 // 只判 TryLock 的实现会把它当成空闲实例淘汰掉。
 func TestPoolIdleCheckConsidersQueue(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Content: "答"})
@@ -95,19 +95,19 @@ func TestPoolIdleCheckConsidersQueue(t *testing.T) {
 
 	inst := mustAcquire(t, r, "cli:a")
 	inst.queue = []queuedTurn{{ctx: context.Background(), msg: inbound("cli:a", "a1", "排队中")}}
-	inst.worker = true
+	inst.busy = 1
 
 	if inst.idleLocked() {
-		t.Fatal("带排队消息（worker 在跑）的实例不应被判为空闲")
+		t.Fatal("带排队消息（回合额度未清）的实例不应被判为空闲")
 	}
 
-	// 队列清空但 worker 标志仍在（worker 正在取任务）→ 同样不可淘汰
+	// 队列清空但额度仍在（回合正在跑、尚未收尾）→ 同样不可淘汰
 	inst.queue = nil
 	if inst.idleLocked() {
-		t.Fatal("worker 尚未退出时不应判为空闲")
+		t.Fatal("回合未收尾时不应判为空闲")
 	}
 
-	inst.worker = false
+	inst.busy = 0
 	if !inst.idleLocked() {
 		t.Fatal("既无回合在跑也无排队消息时应判为空闲")
 	}
@@ -125,7 +125,7 @@ func TestReapSkipsInstanceWithQueuedWork(t *testing.T) {
 	inst := mustAcquire(t, r, "cli:a")
 	inst.lastUsed = time.Now().Add(-2 * time.Hour)
 	inst.queue = []queuedTurn{{ctx: context.Background(), msg: inbound("cli:a", "a1", "排队中")}}
-	inst.worker = true
+	inst.busy = 1
 
 	if n := r.reap(time.Minute); n != 0 {
 		t.Fatalf("带排队消息的实例不应被闲置回收，实际回收 %d 个", n)
@@ -135,14 +135,14 @@ func TestReapSkipsInstanceWithQueuedWork(t *testing.T) {
 	}
 
 	inst.queue = nil
-	inst.worker = false
+	inst.busy = 0
 	if n := r.reap(time.Minute); n != 1 {
 		t.Fatalf("真正空闲的实例应被回收，实际回收 %d 个", n)
 	}
 }
 
-// TestPoolEvictsIdleWithWorkerFlagCleared 固化反向条件：worker 已退出、队列为空的实例可淘汰。
-func TestPoolEvictsIdleWithWorkerFlagCleared(t *testing.T) {
+// TestPoolEvictsIdleAfterTurn 固化反向条件：回合收尾、队列为空的实例可淘汰。
+func TestPoolEvictsIdleAfterTurn(t *testing.T) {
 	srv := fakellm.New(fakellm.Step{Content: "答"})
 	t.Cleanup(srv.Close)
 	cfg := bareConfig(t, srv.BaseURL())
@@ -154,7 +154,7 @@ func TestPoolEvictsIdleWithWorkerFlagCleared(t *testing.T) {
 	}
 	inst := mustAcquire(t, r, "cli:a")
 	if inst.working() {
-		t.Fatal("回合结束后 worker 应已退出")
+		t.Fatal("回合结束后实例应已不算忙")
 	}
 	if inst.pending() != 0 {
 		t.Fatalf("回合结束后队列应为空，实际 %d", inst.pending())

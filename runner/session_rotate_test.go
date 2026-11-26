@@ -197,3 +197,24 @@ func (r *Runner) mustSessionID(t *testing.T, key string) string {
 	}
 	return ag.SessionID()
 }
+
+// TestRotateSessionRightAfterTurn 固化「回合收尾 与 叫醒等待者」的顺序：
+// DispatchTurn 返回时实例必须已经不算忙，否则紧跟其后的 RotateSession 会偶发报
+// “有回合在跑或消息在排队”。修法是回合额度在 queueMu 内先减、再把结果交给等待者。
+func TestRotateSessionRightAfterTurn(t *testing.T) {
+	srv := fakellm.New(fakellm.Step{Content: "答"})
+	t.Cleanup(srv.Close)
+	r := newP4Rig(t, bareConfig(t, srv.BaseURL()), nil)
+
+	for i := 0; i < 30; i++ {
+		if err := r.Dispatch(context.Background(), inbound("cli:a", "a", "继续")); err != nil {
+			t.Fatalf("第 %d 轮 Dispatch: %v", i, err)
+		}
+		if inst, ok := r.pool["cli:a"]; ok && inst.working() {
+			t.Fatalf("第 %d 轮：回合已返回，实例仍被判为忙", i)
+		}
+		if _, err := r.RotateSession("cli:a"); err != nil {
+			t.Fatalf("第 %d 轮 RotateSession: %v", i, err)
+		}
+	}
+}
