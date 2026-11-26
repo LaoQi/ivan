@@ -12,7 +12,7 @@
 - **QQ 通知目标不可配置、只能认领**：`user_openid` 是随 app 变化的平台标识（开发者后台不可见），因此 `channel/qq` 自持状态文件 `<data_dir>/qq/channel.json`（0600 原子写），首启生成 `claim_token` 并打日志，本人私聊机器人发送该令牌即把该账号写为通知目标、轮换令牌并写回；认领消息不进 agent、受 `allow_from` 约束、允许新账号覆盖。通知走主动消息（无 `msg_id`/`msg_seq`，不受 `allow_proactive` 门禁）+ 通道自切分，正文按语法判定走 markdown（拒收则回退纯文本）；无目标时 `Notice` 返回空 → daemon 如实回执 `no_targets`
 - **通知回执必须如实**：`Manager.Route` 对无目标通道只计 `unmatched` 并返回 nil，通知类直投一律经 daemon 的 `deliverStrict`（前后比对 unmatched 计数，涨了返回 `ErrUnroutable`），否则回执会谎报"已投递"
 - 复用核心库 `github.com/LaoQi/battlelab`（`agent`/`tools`/`ctty`，本地 `../battlelab`，`go.work` 联调；2026-10-22 从 tanya 抽出）；**不复用** tanya 的 `repl`/`readline`/`views` 与任何终端所有权（常驻无 TTY 场景）。库侧能力缺口在 battlelab 小步补齐，两仓 CHANGELOG 同步
-- **请求重试**：由库侧 `agent.Config.MaxRetries` 提供（`max_retries`，默认 2、`IVAN_MAX_RETRIES` 覆盖、`0` = 关闭、上限 20 越界回落），重试在库的 `Client.ChatStream` 内层完成、已输出内容后失败不再重试；无人值守路径同样生效（重试期间对通道静默），事件日志落 `retry` 条目（含错误原文与 attempt/max/delay），预算口径不变——**不要再包一层自己的重试**
+- **请求重试**：由库侧 `agent.Config.MaxRetries` 提供（`max_retries`，默认 2、`IVAN_MAX_RETRIES` 覆盖、`0` = 关闭、上限 20 越界回落），重试在库的 `Client.Request` 内层完成、已输出内容后失败不再重试；无人值守路径同样生效（重试期间对通道静默），事件日志落 `retry` 条目（含错误原文与 attempt/max/delay），预算口径不变——**不要再包一层自己的重试**
 - 通道是一等公民：一切输入输出都实现为 `Channel`（IM、本地 CLI、日志、定时触发源）；通道之间互不认识，也不认识业务；所有输入都是 inbound 消息，区别只在 `Channel` 字段
 - **抽库纪律**：`bus` 只依赖标准库；`channel`（含子包）只依赖 `bus`；`qqbot`/`schedule` 只依赖标准库与自身类型。四者都不得依赖 ivan 其他包或 battlelab/tanya（`bus`+`channel` 抽库时成对抽出）
 - **存储抽象**：`schedule.Store` 是消费者定义的窄接口（`List/Get/Put/Delete/Close`，实现须并发安全）；具体存储放子包，**驱动依赖隔离在 `schedule/sqlite`**，`schedule` 本体仍只依赖标准库
@@ -105,4 +105,4 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "说点长的"       # TTY 下原地
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 
-依赖：`github.com/LaoQi/battlelab` 经上层工作区的 `go.work`（`use ./ ../battlelab`）本地联调，`go.mod` 记的是**已发布版本**（当前 v0.7.0）、没有 `replace`，故 `GOWORK=off` 走发布版（钩子/`ForceHandoff` 等新 API 要等库发版后才可用）；**已不直接依赖 tanya**，仅运行期借用其配置文件；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。
+依赖：`github.com/LaoQi/battlelab` 经上层工作区的 `go.work`（`use ./ ../battlelab`）本地联调，`go.mod` 记的是**已发布版本**（当前 v0.8.0）、没有 `replace`，故 `GOWORK=off` 走发布版（钩子/`ForceHandoff`、`Client` 与请求形态解耦都已在 v0.8.0 里，`GOWORK=off go build/vet/test ./...` 已验证）；**已不直接依赖 tanya**，仅运行期借用其配置文件；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。
