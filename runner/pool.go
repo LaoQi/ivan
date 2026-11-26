@@ -23,6 +23,7 @@ type instance struct {
 	ws       string
 	mu       sync.Mutex
 	ag       *agent.Agent
+	hint     *handoffHint
 	lastUsed time.Time
 	turns    uint64
 
@@ -167,6 +168,7 @@ func (r *Runner) acquire(key string) (*instance, error) {
 		}
 	}
 	inst := &instance{key: key, ws: r.cfg.AgentDir(bus.KeySlug(key)), lastUsed: time.Now()}
+	inst.hint = r.newHandoffHint(inst)
 	r.pool[key] = inst
 	r.poolMu.Unlock()
 	return inst, nil
@@ -270,6 +272,7 @@ func (r *Runner) buildAgent(inst *instance) (*agent.Agent, error) {
 			Goals:     filepath.Join(inst.ws, "GOALS.md"),
 		})),
 		agent.WithTools(list...),
+		agent.WithHooks(inst.hint),
 		agent.WithGlobalAgentsPath(r.cfg.GlobalAgentsPath()),
 	)
 	if err != nil {

@@ -29,7 +29,9 @@
 - 无人值守安全：预算熔断、暂停开关、单实例锁是硬性交付项（不得后置）；AppSecret 不进日志/事件/错误信息。**危险命令黑名单与审批档属 P5 保留计划，当前未实施**（缓解只有限定工作区 + 预算 + 暂停 + 事件审计）
 - 崩溃回合：`DispatchTurn` 期间在 `state.json` 留 `running` 标记，启动时 `DrainRunning` 清残留、记 `turn_interrupted`、并在该会话下一次回合注入"上次回合被中断、先核对实际状态"的提示（只注入一次）
 - 记忆裁剪：`runner.memory_max_bytes`（默认 0=不裁剪），回合结束后按行边界保留尾部 + 头部裁剪标记（`data.TrimFileTail`）
-- 交接阈值两档（绝对值，`handoff_hint_tokens` 180K / `handoff_force_tokens` 256K）：建议档只提示、强制档要求立即交接且不交接就停（不再发请求）；两档每任务各触发一次，且都受暂停/预算闸门
+- 交接阈值两档（绝对值，`handoff_hint_tokens` 180K / `handoff_force_tokens` 256K，判据 `max(上报 ContextTokens, 估算 Est)`）：
+  **建议档**由 `BeforeRequest` 钩子（`runner/handoffhint.go`，每会话实例一个）在回合内 `AppendNotice` 注入提示——注入落在当回合的请求里，**不再额外多发一轮**，一次入站消息的推进过程内只注入一次、会话边界重新计；**强制档**不走钩子，回合间隙由 runner 调 `agent.ForceHandoff` 强制复位（摘要指令由 ivan 给、库零文案），取不到摘要即停、刚复位完仍超阈值也停（局部 `justReset`，不设次数配额）；两档都受暂停/预算闸门，见 `docs/handoff.md`
+- 摘要请求的用量（`ForceHandoff`）**不计入预算**：库不计 `Stats()`，ivan 也不估算（预算只在一处统计），代价靠"一次推进至多一次 + 调用前过预算闸门"控制
 - 预算只在一处统计：`runner`（`max_turns_per_task`/`max_tokens_per_task`/`max_tokens_per_day`，日用量落 `state.json` 跨进程累计），调度器用注入的 `Budget` 回调复用；不要再加第二个预算口径
 - 暂停语义：`paused` 只挡**无人值守路径**（定时作业触发、交接后自动续跑、阈值交接提示），用户主动消息照常处理
 - 记忆与目标**按需读取**：路径写进 system prompt（静态、保缓存），模型自己 `run_shell` 读/追加，不做每轮注入、不建专用工具
@@ -61,7 +63,7 @@ channel/cli/          cli 通道：unix socket（JSON Lines，send/status/ping/c
 channel/log/          人类可读 Sink（io.Writer，stdlib 依赖）[已实现]
 data/                 EventLog（结构化 events jsonl）/ State（state.json 原子写，含会话映射、暂停、日用量、回合进行中标记）/ Lock（flock）/ LogFile / ProcessAlive / TrimFileTail（按行裁剪）[已实现]
 prompt/               内置 system 提示词（system_prompt.md 嵌入）+ 环境段（含会话键、记忆文件、目标文件路径）；全局说明由 `config.global_agents` 注入（默认 `~/.config/ivan/AGENTS.md`）[已实现]
-runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消、会话轮换）+ 回合驱动与事件分流 + 阈值交接提示/预算暂停闸门/schedule 工具 + `send_message`/`send_file` 工具 + 崩溃回合恢复（`interrupted`）/记忆裁剪 [已实现]
+runner/               Options/Dispatch/Run/Status + pool（实例池、懒建、LRU/闲置回收、回合取消、会话轮换）+ 回合驱动与事件分流 + 交接提醒钩子（`handoffhint.go`）/强制复位（`handoffforce.go`）/预算暂停闸门/schedule 工具 + `send_message`/`send_file` 工具 + 崩溃回合恢复（`interrupted`）/记忆裁剪 [已实现]
 daemon/               daemon.New/Run（装配、优雅停机顺序、Control(status)）+ Status 结构 [已实现]
 probe/                复用探针 R1–R11（假 LLM 驱动）[已实现]
 internal/fakellm/     本地假 LLM（SSE，chat 协议）供探针与测试用 [已实现]
@@ -103,4 +105,4 @@ IVAN_DATA_DIR=/tmp/ivan-smoke go run . send "说点长的"       # TTY 下原地
 pkill -TERM -x ivan                      # 优雅停机（socket 与锁自动收尾，作业库随进程关闭）
 ```
 
-依赖：`github.com/LaoQi/battlelab` 经 `go.work`（`use ./ ../battlelab`）与 `go.mod` 的 `replace ../battlelab` 本地联调（**已不直接依赖 tanya**，仅运行期借用其配置文件）；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。
+依赖：`github.com/LaoQi/battlelab` 经上层工作区的 `go.work`（`use ./ ../battlelab`）本地联调，`go.mod` 记的是**已发布版本**（当前 v0.7.0）、没有 `replace`，故 `GOWORK=off` 走发布版（钩子/`ForceHandoff` 等新 API 要等库发版后才可用）；**已不直接依赖 tanya**，仅运行期借用其配置文件；需 **Go ≥ 1.26**（`modernc.org/sqlite v1.60.1` 的 go 指令要求，`go.mod`/`go.work` 已同步）。

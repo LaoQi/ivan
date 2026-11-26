@@ -703,7 +703,9 @@ func (t *task) run(ctx context.Context) error {
 		}
 	}()
 	t.streamStart()
-	hinted, forced, hops := false, false, 0
+	t.inst.hint.arm()
+	defer t.inst.hint.disarm()
+	justReset := false
 	for turn := 0; ; turn++ {
 		ag, err := t.r.agentFor(t.inst)
 		if err != nil {
@@ -728,8 +730,7 @@ func (t *task) run(ctx context.Context) error {
 			return err
 		}
 		if h, ok := ag.TakeHandoff(); ok {
-			hops++
-			hinted, forced = false, false
+			justReset = false
 			t.r.handoffs.Add(1)
 			t.r.saveMapping(t.key, ag.SessionID(), t.inst.ws)
 			t.r.human(chlog.Event{Kind: "handoff", Session: t.key, Channel: t.msg.Channel, Handoff: true, Text: h.OldID + " → " + h.NewID})
@@ -748,79 +749,32 @@ func (t *task) run(ctx context.Context) error {
 			t.r.continued.Add(1)
 			continue
 		}
-		level := t.pressure()
-		if level == pressureNone {
+		used := contextUsed(ag.Stats())
+		force := t.r.cfg.Runner.HandoffForceTokens
+		if force <= 0 || used < force {
 			return nil
 		}
-		if level == pressureHint && hinted {
-			return nil
-		}
-		if level == pressureForce && forced {
-			t.forcedStop(hops)
+		if justReset {
+			t.forceStopped(used)
 			return nil
 		}
 		if t.r.paused() {
-			t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: "暂停中，跳过上下文阈值交接"})
-			t.r.note("paused", t.key+" 跳过上下文阈值交接")
+			t.r.human(chlog.Event{Kind: "paused", Session: t.key, Channel: t.msg.Channel, Tool: "force_handoff", Text: "暂停中，跳过强制交接"})
+			t.r.note("paused", t.key+" 跳过强制交接")
 			return nil
 		}
 		if t.stopForBudget(turn) {
 			return nil
 		}
-		notice := ""
-		kind := ""
-		switch level {
-		case pressureHint:
-			hinted = true
-			t.r.hinted.Add(1)
-			notice = fmt.Sprintf(handoffHintNotice, t.contextTokens(), t.r.cfg.Runner.HandoffHintTokens)
-			kind = "handoff_hint"
-		case pressureForce:
-			forced = true
-			t.r.forced.Add(1)
-			notice = fmt.Sprintf(handoffForceNotice, t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens)
-			kind = "handoff_force"
-		}
-		if err := ag.AppendNotice(notice); err != nil {
-			t.r.notice("注入交接提示失败 key=%s: %v", t.key, err)
+		if !t.forceHandoff(ctx, ag, used) {
 			return nil
 		}
-		text := fmt.Sprintf("上下文 %d tokens 达阈值 %d，已%s交接", t.contextTokens(), t.levelTokens(level), map[bool]string{true: "强制", false: "建议"}[level == pressureForce])
-		t.r.human(chlog.Event{Kind: kind, Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: text})
-		t.r.note(kind, t.key+" "+text)
+		justReset = true
+		t.r.continued.Add(1)
 	}
 }
 
 const interruptedNotice = "系统提示：上一次回合在执行中因进程退出被中断（来源 %s，开始于 %s），其结果未知。继续之前先核对工作区与实际状态的进展，不要假定上一步已完成。"
-
-const handoffHintNotice = "系统提示：本会话上下文已到 %d tokens（建议交接阈值 %d）。建议在本阶段收尾后调用 next_session 交接进度（summary 写清已完成内容、关键结论与下一步）；若目标马上就能完成，可先把当前步骤做完再交接。"
-
-const handoffForceNotice = "系统提示：本会话上下文已到 %d tokens，达到强制交接阈值 %d。必须立即调用 next_session 完成交接，本回合不要再做其他工作，也不要继续读文件或跑命令。"
-
-type handoffPressure int
-
-const (
-	pressureNone handoffPressure = iota
-	pressureHint
-	pressureForce
-)
-
-func (t *task) levelTokens(level handoffPressure) int {
-	if level == pressureForce {
-		return t.r.cfg.Runner.HandoffForceTokens
-	}
-	return t.r.cfg.Runner.HandoffHintTokens
-}
-
-func (t *task) forcedStop(hops int) {
-	text := fmt.Sprintf("上下文 %d tokens 达强制交接阈值 %d，模型仍未交接，本任务已停止（下次消息继续）", t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens)
-	if hops > 0 {
-		text = fmt.Sprintf("上下文 %d tokens 仍达强制交接阈值 %d（本任务已交接 %d 次，新会话基线即超阈值），已停止；请调高 handoff_*_tokens 或拆分任务",
-			t.contextTokens(), t.r.cfg.Runner.HandoffForceTokens, hops)
-	}
-	t.r.human(chlog.Event{Kind: "handoff_forced", Session: t.key, Channel: t.msg.Channel, Tool: "next_session", Text: text})
-	t.r.note("handoff_forced", t.key+" "+text)
-}
 
 func (t *task) stopForBudget(turn int) bool {
 	if max := t.r.cfg.Runner.MaxTurnsPerTask; max > 0 && turn+1 >= max {
@@ -841,30 +795,6 @@ func (t *task) stopForBudget(turn int) bool {
 func (t *task) blocked(text string) {
 	t.r.human(chlog.Event{Kind: "budget", Session: t.key, Channel: t.msg.Channel, Text: text})
 	t.r.note("budget", t.key+" "+text)
-}
-
-func (t *task) pressure() handoffPressure {
-	used := t.contextTokens()
-	if used <= 0 {
-		if ag := t.inst.ag; ag != nil {
-			st := ag.Stats()
-			if st.HasContext {
-				used = st.ContextTokens
-			} else {
-				used = st.Est
-			}
-		}
-	}
-	if used <= 0 {
-		return pressureNone
-	}
-	if force := t.r.cfg.Runner.HandoffForceTokens; force > 0 && used >= force {
-		return pressureForce
-	}
-	if hint := t.r.cfg.Runner.HandoffHintTokens; hint > 0 && used >= hint {
-		return pressureHint
-	}
-	return pressureNone
 }
 
 func (t *task) sink(e agent.Event) {

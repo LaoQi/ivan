@@ -33,11 +33,9 @@ Inbound → runner.dispatch(msg)
 
 1. 聚合本轮文本 → `OutboundMessage{ReplyTo: inbound.MessageID}` → Bus（回到来源渠道）。
 2. `TakeHandoff()`：若有交接 → 更新 `state.json` 的 session 映射 → 若 `Continue` 则立即 `agent.Continue(ctx, sink)` 继续跑（这就是长任务跨会话推进）。
-3. 上下文压力（**已实现，两档**）：以 `ContextTokens`（上次请求的 prompt tokens，缺失回退 `Stats.ContextTokens`/`Est`）对比两个绝对阈值——
-   - **一级 建议交接** `handoff_hint_tokens`（默认 180000）：注入"建议在本阶段收尾后调用 next_session 交接"，模型可先把当前步骤做完；每任务只注入一次。
-   - **二级 强制交接** `handoff_force_tokens`（默认 256000）：注入"必须立即调用 next_session，本回合不再做其他工作"（事件 `handoff_force`）；若模型仍未交接，**停止本任务**（事件 `handoff_forced`），不再发请求以免撞窗口。
-   - 两档都走 `AppendNotice` + `Continue` 一轮，都不受 `auto_continue` 限制（安全阀），但同样受暂停与预算闸门；建议档之后的回合跨到强制档会再升级提示一次（`hinted`/`forced` 各自只触发一次，循环有界）。
-   - **交接后重置**：每发生一次交接，`hinted`/`forced` 清零（新会话上下文基线不同，两档重新计），并累加本任务的 `hops`；若交接后新会话基线**仍**超强制阈值、模型又不再交接，则停止并给出诊断（`handoff_forced`，提示"已交接 N 次、新会话即超阈值，请调阈值或拆任务"），而不是笼统说"模型未交接"。
+3. 上下文压力（**两档，判定与文案见 `docs/handoff.md`**）：判据统一为 `contextUsed = max(上报 prompt tokens, 本地估算 Est)`，对比两个绝对阈值——
+   - **一级 建议交接** `handoff_hint_tokens`（默认 180000）：由 `BeforeRequest` 钩子在**回合内**注入"建议在本阶段收尾后调用 next_session 交接"，模型可先把当前步骤做完；本回合这次请求就带上提示，**不再额外多发一轮**（旧实现是回合后注入 + `Continue`）。一次入站消息的推进过程内只注入一次，会话边界（交接/新建/轮换）重新计。
+   - **二级 强制交接** `handoff_force_tokens`（默认 256000）：**不走钩子**——回合间隙由 runner 调 `agent.ForceHandoff` 直接复位（按 ivan 给的指令取摘要 → 旧会话落地 → 轮转新会话，事件 `handoff_force`）；摘要取不到即停（事件 `handoff_forced`，会话与文件零变化），刚复位过仍超阈值也停并给诊断（不再来第二次）。两档都受暂停与预算闸门。
 4. 预算（**已实现**）：`max_turns_per_task`（续跑轮次）、`max_tokens_per_task`（单任务）、`max_tokens_per_day`（**全局日预算**，含用户消息/定时作业/续跑，按本地日累计在 `state.json`，跨进程生效）任一超限 → 停止推进，落 `budget` 事件后安静停下。
 5. 失败：回合错误 → 记事件、回错误摘要到来源渠道（**不做**自动重试：重试会把无人值守的成本放大）。
 6. 暂停（`state.json: paused`，`ivan pause/resume`）只挡**无人值守路径**：定时作业触发、交接后自动续跑、阈值交接提示；用户主动发来的消息照常处理（人在场时不该被挡住）。
@@ -103,7 +101,7 @@ Inbound → runner.dispatch(msg)
 
 代码：`runner/runner.go`（阈值交接提示、预算/暂停闸门、`CancelTurn`、`Budget`）、`runner/pool.go`（实例回合取消、记忆/目标路径进 prompt）、`prompt/`（`Info` 结构 + 记忆/目标段）、`data/state.go`（`usage` 日累计）、`config`（`runner.max_tokens_per_day`、`MemoryDir`）、`daemon`（暂停/预算接线、`cancel` 控制指令）、`commands.go`（`ivan cancel`、status 的 budget 行）。
 
-1. **两档阈值交接**：`task.pressure()` 返回 `none|hint|force`（绝对值 `handoff_hint_tokens`/`handoff_force_tokens`，默认 180K/256K，配置里强制档必须大于建议档否则启动报错）；建议档注入"收尾后交接"提示，强制档注入"立即交接、本回合别做别的"指令。`hinted`/`forced` 各自每任务只触发一次（事件 `handoff_hint`/`handoff_force`），**每次交接后清零**（并记 `hops`，新会话基线可能仍超阈值）；强制档提示后模型仍不交接 → 停止任务并记 `handoff_forced`（不再发请求），已交接过的任务给出"新会话基线即超阈值"的诊断文案。`auto_continue` 关时只多做提示轮（把上下文安全交出去），交接后仍不续跑；`status` 的 `budget` 行显示两档阈值与 `hints/forced` 计数。
+1. **两档阈值交接**（**2026-11-26 已迁移到钩子 + `ForceHandoff`，见 §14 与 `docs/handoff.md`**；本节保留 P4 初版实现记录）：`task.pressure()` 返回 `none|hint|force`（绝对值 `handoff_hint_tokens`/`handoff_force_tokens`，默认 180K/256K，配置里强制档必须大于建议档否则启动报错）；建议档注入"收尾后交接"提示，强制档注入"立即交接、本回合别做别的"指令。`hinted`/`forced` 各自每任务只触发一次（事件 `handoff_hint`/`handoff_force`），**每次交接后清零**（并记 `hops`，新会话基线可能仍超阈值）；强制档提示后模型仍不交接 → 停止任务并记 `handoff_forced`（不再发请求），已交接过的任务给出"新会话基线即超阈值"的诊断文案。`auto_continue` 关时只多做提示轮（把上下文安全交出去），交接后仍不续跑；`status` 的 `budget` 行显示两档阈值与 `hints/forced` 计数。
 2. **预算熔断**（三处闸门 + 一处持久化）：`max_turns_per_task` / `max_tokens_per_task` / `max_tokens_per_day`，前两者按任务、后者按**本地日**；日用量由 `data.State` 的 `usage{date,tokens}` 记录（原子写，随 `state.json`），`DispatchTurn` 结束时由 `runner.chargeTokens` 累加，`runner.Budget()` 对外暴露给调度器。调度器不再自带计数器（P3 的 `schedule.max_tokens_per_day` 已删除，统一到 runner，避免两个预算口径）。
 3. **暂停开关语义**：`paused` 只挡无人值守路径（定时作业、交接续跑、阈值交接提示），用户消息照常处理；事件分别记 `paused`（runner）与 `job_paused`（调度器）。
 4. **取消**：实例持当前回合 `context.CancelFunc`，`CancelTurn(key)` 取消并返回是否有在跑回合；`ivan cancel <会话键>` 经 socket 调用。该机制只覆盖**已真正开始执行**的回合，排队与等并发槽阶段覆盖不到（§11 结尾）。
@@ -218,3 +216,13 @@ ivan sessions new <会话键>         轮换该会话（需 daemon 运行）
 **变异复验 4 处全部准确变红**：无实例时也标记为已轮换、不写回映射、不调 `NewSession`（旧上下文残留）、跳过忙碌检查。
 
 **顺带修掉的既有竞态**：`channel/cli` 的 `accept()` 在 goroutine 内 `wg.Add(1)`，与 `Stop()` 的 `wg.Wait()` 构成数据竞争（`go test -race -count=30` 在**未改动**的 HEAD 上同样复现）。修法：`Start` 在启动 goroutine **之前**持锁 `wg.Add(1)`，`accept()` 改为 `defer s.wg.Done()`。
+
+## 14 交接迁移：建议档钩子 + 强制档 `ForceHandoff`（2026-11-26）
+
+P4 的两档阈值原实现是"回合结束后 `AppendNotice` + `Continue` 一轮"：建议档白花一次请求，强制档指望模型照做（不照做就只能停）。库侧补齐生命周期钩子（`agent.WithHooks`）、钩子 ctx 携带实例（`agent.FromContext`）与外部强制复位（`agent.ForceHandoff`）后，ivan 侧改为两条各归其位的路，细节见 `docs/handoff.md`：
+
+1. **建议档 = `BeforeRequestHook`**（`runner/handoffhint.go`，每会话实例一个）。钩子在一次入站消息的推进过程内 `arm`/`disarm`，`fired` 保证只注入一次，会话边界清 `fired`；判据 `max(ContextTokens, Est)`，暂停闸门在钩子内（跳过并记一次 `paused` 事件）。**注入落在当回合的请求里，不再额外发一轮**。
+2. **强制档 = 回合间隙 `ForceHandoff`**（`runner/handoffforce.go`，不走钩子）。摘要指令由 ivan 给（库零文案），复位成功后按 `auto_continue` 决定是否续跑；失败即停（`handoff_forced`，会话与文件零变化）；用局部 `justReset` 保证"复位完仍超阈值就停"，不设次数配额、不加新配置。
+3. **口径收敛**：删掉 `task.pressure()`/`levelTokens()`/`forcedStop()`/`handoffForceNotice` 与 `hinted`/`forced` 局部标志（由钩子与 `justReset` 承担）；`handoff_force` 语义变为"强制复位成功"，`handoff_forced` 变为"复位失败/复位后仍超阈值而停"；一次轮转只发一条事实事件（模型路径 `handoff`、强制路径 `handoff_force`）。
+4. **预算**：摘要请求的用量不记入 `max_tokens_per_task`/`max_tokens_per_day`（库不计 `Stats()`，ivan 也不估算），靠"一次推进至多一次 + 调用前过预算闸门"控制。
+5. **测试**：`runner/p4_test.go` 8 例改写（阈值改成 100000/200000 大数 + 假 LLM 报 `prompt_tokens`，避开 system prompt 估算量），覆盖回合内注入/一次推进一次/未达阈/暂停跳过/强制复位（含摘要请求不带工具与 `TokensToday` 不含摘要用量）/复位后续跑/摘要失败停且不轮转/建议→强制升级/复位后仍超阈值的诊断。`go build/vet ./...`、`gofmt -l`、`go test ./...`、`go test -race ./runner/`、`go test ./probe/ -v` 全绿。

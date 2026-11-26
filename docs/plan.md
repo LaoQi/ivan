@@ -112,7 +112,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 | P1 | `bus` + `channel` 抽象 + `cli`/`log` 通道 + daemon（socket、单实例锁、优雅停机、status） | ✅ 两个通道跑通；daemon 重启后状态可查、会话可续（`docs/channels.md` §10、`docs/sessions.md` §9） |
 | P2 | `qqbot/` 协议包 + `channel/qq` 适配器：token/gateway/ws/收发/切分/去重/被动回复/图片 | ✅ 协议单测 + 假网关集成测试通过；生产凭证真机**单聊全链路已通**（入站→回合→回复），群 @/图片待验（`docs/qq-bot.md` §13） |
 | P3 | 定时与计划任务：Job 存储（抽象 + sqlite）、调度循环、`schedule` 工具、结果回原渠道 | ✅ 重启后作业恢复；模型自建 `at`/`every` 作业按时触发并把结果发回原会话（本地端到端全绿 + **QQ 真机提醒通过**；`docs/schedule.md` §8） |
-| P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接（建议 180K / 强制 256K 两档）、按需读取的记忆/目标文件、预算熔断、暂停开关 | ✅ 开启 `auto_continue` 后单条消息可跨会话推进，且被轮次/任务预算/日预算/暂停四处闸门约束；上下文达建议档提示交接、达强制档要求立即交接（不交接则停）（`docs/sessions.md` §10） |
+| P4 | 受控推进：交接自动续跑（**默认关**）、上下文阈值自动交接（建议 180K / 强制 256K 两档）、按需读取的记忆/目标文件、预算熔断、暂停开关 | ✅ 开启 `auto_continue` 后单条消息可跨会话推进，且被轮次/任务预算/日预算/暂停四处闸门约束；上下文达建议档在**回合内**注入提示（`BeforeRequest` 钩子，不多花请求）、达强制档由 runner 在回合间隙 `ForceHandoff` 强制复位（取不到摘要即停）（`docs/sessions.md` §10/§14、`docs/handoff.md`） |
 | P5 | ⏸ **保留计划（暂无实施规划）**：审批档、危险命令规则、限额、日志轮转、systemd unit、`ivan doctor` | 未验收。P5 各子项当前**均未实施**；「危险命令被拦」「服务随 systemd 起停」不构成本阶段的现行承诺。重新启动时先补设计（审批在常驻无 TTY 场景下的交互路径是首要分歧点） |
 
 ## 9 决策记录
@@ -150,6 +150,7 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 - `docs/qq-bot.md` QQ 官方机器人协议设计、实现分层与抽库路径
 - `docs/schedule.md` 定时与计划任务设计与 P3 实现记录（§8）
 - `docs/sessions.md` 会话模型、agent 实例池与推进策略
+- `docs/handoff.md` 上下文交接：建议档钩子提醒与强制档 `ForceHandoff` 复位
 - `docs/notify.md` 外部入口（`/notify` 与 `/request`、`send_message`、`ivan notify`）
 - `docs/refs-picoclaw.md` 参考调研快照与取舍
 - 根 `AGENTS.md` 现行约束与结构；`CHANGELOG.md` 变更记录
@@ -165,6 +166,6 @@ schedule/sqlite/   作业库实现（modernc.org/sqlite，唯一引入 sqlite �
 5. **抽库推迟到 P2 之后，且首抽只抽 `qqbot`**。
 6. **受控推进**：自动续跑默认关、仅指定工作区、硬预算上限、结果待人复核。
 7. **记忆按需读取**：记忆/目标文件路径写入提示词由模型自读，长期压缩依赖交接摘要，不做每轮全量注入。
-8. **新增 ivan 侧配置**：交接阈值（P4 起为 `handoff_hint_tokens` 180K / `handoff_force_tokens` 256K 两档绝对值）、`auto_continue`、预算项。
+8. **新增 ivan 侧配置**：交接阈值（P4 起为 `handoff_hint_tokens` 180K / `handoff_force_tokens` 256K 两档绝对值）、`auto_continue`、预算项。**修订（2026-11-26）**：两档的语义由「注入提示/强制指令 + 各续跑一轮」改为「建议档走 `BeforeRequest` 钩子在回合内注入；强制档由 runner 在回合间隙调 `ForceHandoff` 直接复位」，配置项与默认值不变（`docs/handoff.md`）。
 9. **概念三分**：`Channel`（外部端点）/ `Trigger`（内部触发源）/ `Sink`（观测出口），不再把所有 IO 硬套通道接口。
 10. **沙箱降级为可选增强**：安全主线是审批白/黑名单 + 预算 + 只读纪律。
