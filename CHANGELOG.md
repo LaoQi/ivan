@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-11-27
+- chore(deps): battlelab v0.8.0 → v0.8.1（工具描述精简，无 API 变更）——上游 `38274ce` 发版：`run_shell` 的 `interactive` 参数去掉 pty/CONIN$ 实现细节、等待动画与重复的超时说明，`next_session` 的 `continue`/`workspace` 语义只在 `params` 里说一次，`agent_custom` 的 `action`/`key` 语义同理；本仓只升 `go.mod`/`go.sum`、无代码适配。升级用 `GOFLAGS=-mod=mod GOSUMDB=off GOPROXY=direct`（新 tag 的 sumdb 记录未缓存，与上一轮同因）。验证（`GOWORK=off` 走发布版）：`go mod verify`、`go build ./...`、`go vet ./...`、`go test ./...`（15 包）全绿。
 - feat(runner,prompt,commands): **交接提示改成两段式（回合内辅助提示 + 回合末下令），计数三分**——真实模型实测暴露两个方向的毛病：只有回合内提示时模型带着提示又跑 16 次工具轮、`handoffs=0`；只保留回合末下令时判定又太晚（单回合上下文涨到 `ctx=107418` 才被问一次，越阈 3 倍以上）。于是把两者叠起来，形成"一条主线 + 两条兜底"：
   **回合内辅助提示**恢复为 `BeforeRequest` 钩子（`runner/handoffhint.go` 的 `handoffHint`，每会话实例一个；`arm`/`disarm` 随一次入站消息的推进过程、`fired` 保证一次推进只提示一条、会话边界清 `fired`、暂停闸门在钩子内、实例取自 `agent.FromContext`）——**建议语气**，模型可先把手上这步做完，提示随当回合请求带出、不多发请求。
   **回合末下令**留在 `task.run` 出口（`handoffDirective`）：回合已结束、`TakeHandoff` 未命中、未达强制档且仍 ≥ 阈值 → 往历史末尾写一条**命令语气**的"现在开始交接进度"指令并**直接 `continue` 开一回合**（这一回合就是交接回合）；`task.run` 局部 `hinted` 保证一次推进至多一条，暂停/预算命中就不开；注入时 `hint.mark()`，本次推进余下请求不再出辅助提示。强制档优先级最高（回合末已超 `handoff_force_tokens` 就只复位，两处提示都不发）。
